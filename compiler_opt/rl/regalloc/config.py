@@ -14,16 +14,59 @@
 # limitations under the License.
 """Register allocation training config."""
 
+from numpy import dtype, maximum
 import gin
 import tensorflow as tf
 from tf_agents.specs import tensor_spec
 from tf_agents.trajectories import time_step
 from compiler_opt.rl import feature_ops
 
+from absl import logging
 
 def get_num_registers():
   return 33
 
+def get_opcode_count():
+  return 17716
+
+def get_num_instructions():
+  return 300
+
+class process_instruction_features(tf.keras.Model):
+
+  def __init__(self, opcode_count, register_count, instruction_count, embedding_dimensions=16):
+    super().__init__()
+    self.opcode_count = opcode_count
+    self.register_count = register_count
+    self.instruction_count = instruction_count
+    self.embedding_dimensions = embedding_dimensions
+    self.embedding_layer = tf.keras.layers.Embedding(self.opcode_count,
+                                                     self.embedding_dimensions,
+                                                     input_length=self.instruction_count)
+
+  def get_config(self):
+    return {
+      "opcode_count": self.opcode_count,
+      "register_count": self.register_count,
+      "instruction_count": self.instruction_count,
+      "embedding_dimensions": self.embedding_dimensions
+    }
+
+  @classmethod
+  def from_config(cls, config):
+    return cls(**config)
+
+  def call(self, inputs):
+    # The first row is the instructions, and all rows afterwards compose the binary
+    # mapping matrix
+    instruction_opcodes = tf.slice(inputs, begin=[0, 0, 0], size=[-1, 1, self.instruction_count])
+    instruction_opcodes = tf.reshape(instruction_opcodes, [-1, self.instruction_count])
+    binary_mapping_matrix = tf.slice(inputs, begin=[0, 1, 0], size=[-1, self.register_count, self.instruction_count])
+    binary_mapping_matrix_casted = tf.cast(binary_mapping_matrix, tf.float32)
+    instruction_embeddings = self.embedding_layer(instruction_opcodes)
+
+    matrix_product = tf.linalg.matmul(binary_mapping_matrix_casted, instruction_embeddings)
+    return matrix_product
 
 # pylint: disable=g-complex-comprehension
 @gin.configurable()
@@ -31,6 +74,8 @@ def get_regalloc_signature_spec():
   """Returns (time_step_spec, action_spec) for LLVM register allocation."""
   # LINT.IfChange
   num_registers = get_num_registers()
+  num_instructions = get_num_instructions()
+  num_opcodes = get_opcode_count()
 
   observation_spec = dict(
       (key, tf.TensorSpec(dtype=tf.int64, shape=(num_registers), name=key))
@@ -52,6 +97,9 @@ def get_regalloc_signature_spec():
                        'end_bb_freq_by_max', 'hottest_bb_freq_by_max',
                        'liverange_size', 'use_def_density', 'nr_defs_and_uses',
                        'nr_broken_hints', 'nr_urgent', 'nr_rematerializable')))
+  observation_spec['instructions_and_mapping'] = tensor_spec.BoundedTensorSpec(
+      dtype=tf.int64, shape=(num_registers + 1, num_instructions), 
+      name='instructions_and_mapping', minimum=0, maximum=num_opcodes)
   observation_spec['progress'] = tensor_spec.BoundedTensorSpec(
       dtype=tf.float32, shape=(), name='progress', minimum=0, maximum=1)
 
@@ -125,6 +173,9 @@ def get_observation_processing_layer_creator(quantile_file_dir=None,
         return tf.concat(features, axis=-1)
 
       return tf.keras.layers.Lambda(use_def_density_processing_fn)
+    
+    if obs_spec.name == 'instructions_and_mapping':
+      return process_instruction_features(get_opcode_count(), get_num_registers(), get_num_instructions())
 
     if obs_spec.name == 'progress':
 
@@ -141,9 +192,9 @@ def get_observation_processing_layer_creator(quantile_file_dir=None,
 
   return observation_processing_layer
 
-
 def get_nonnormalized_features():
-  return [
-      'mask', 'nr_urgent', 'is_hint', 'is_local', 'is_free', 'max_stage',
-      'min_stage', 'reward'
-  ]
+  return ['mask', 'nr_urgent',
+          'is_hint', 'is_local',
+          'is_free', 'max_stage',
+          'min_stage', 'reward',
+          'instructions_and_mapping']
