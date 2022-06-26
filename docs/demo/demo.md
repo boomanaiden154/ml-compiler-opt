@@ -262,6 +262,8 @@ in the trace changes.
 rm -rf $DEFAULT_VOCAB &&
   PYTHONPATH=$PYTHONPATH:. python3 \
     compiler_opt/tools/sparse_bucket_generator.py \
+    --gin_files=compiler_opt/rl/inlining/gin_configs/common.gin \
+    --gin_bindings=config_registry.get_configuration.implementation=@configs.InliningConfig \
     --input=$DEFAULT_TRACE \
     --output_dir=$DEFAULT_VOCAB
 ```
