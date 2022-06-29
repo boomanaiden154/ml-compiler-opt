@@ -32,6 +32,12 @@ def get_opcode_count():
 def get_num_instructions():
   return 300
 
+def sparse_dense_matmult_batch(sp_a, b):
+    return tf.map_fn(
+        lambda x: tf.sparse.sparse_dense_matmul(x[0], x[1]),
+        elems=(sp_a, b), fn_output_signature=tf.float32
+    )
+
 class process_instruction_features(tf.keras.Model):
 
   def __init__(self, opcode_count, register_count, instruction_count, embedding_dimensions=16):
@@ -59,13 +65,18 @@ class process_instruction_features(tf.keras.Model):
   def call(self, inputs):
     # The first row is the instructions, and all rows afterwards compose the binary
     # mapping matrix
-    instruction_opcodes = tf.slice(inputs, begin=[0, 0, 0], size=[-1, 1, self.instruction_count])
+    batch_size = inputs.get_shape().as_list()[0]
+    logging.warning(type(inputs))
+    if type(inputs) is tf.Tensor:
+      inputs = tf.sparse.from_dense(inputs)
+    instruction_opcodes = tf.sparse.slice(inputs, start=[0, 0, 0], size=[batch_size, 1, self.instruction_count])
+    instruction_opcodes = tf.sparse.to_dense(instruction_opcodes)
     instruction_opcodes = tf.reshape(instruction_opcodes, [-1, self.instruction_count])
-    binary_mapping_matrix = tf.slice(inputs, begin=[0, 1, 0], size=[-1, self.register_count, self.instruction_count])
+    binary_mapping_matrix = tf.sparse.slice(inputs, start=[0, 1, 0], size=[batch_size, self.register_count, self.instruction_count])
     binary_mapping_matrix_casted = tf.cast(binary_mapping_matrix, tf.float32)
     instruction_embeddings = self.embedding_layer(instruction_opcodes)
 
-    matrix_product = tf.linalg.matmul(binary_mapping_matrix_casted, instruction_embeddings)
+    matrix_product = sparse_dense_matmult_batch(binary_mapping_matrix_casted, instruction_embeddings)
     return matrix_product
 
 # pylint: disable=g-complex-comprehension
@@ -97,9 +108,9 @@ def get_regalloc_signature_spec():
                        'end_bb_freq_by_max', 'hottest_bb_freq_by_max',
                        'liverange_size', 'use_def_density', 'nr_defs_and_uses',
                        'nr_broken_hints', 'nr_urgent', 'nr_rematerializable')))
-  observation_spec['instructions_and_mapping'] = tensor_spec.BoundedTensorSpec(
-      dtype=tf.int64, shape=(num_registers + 1, num_instructions), 
-      name='instructions_and_mapping', minimum=0, maximum=num_opcodes)
+  observation_spec['instructions_and_mapping'] = tf.SparseTensorSpec(
+      dtype=tf.int64, shape=(num_registers + 1, num_instructions),
+      name='instructions_and_mapping') 
   observation_spec['progress'] = tensor_spec.BoundedTensorSpec(
       dtype=tf.float32, shape=(), name='progress', minimum=0, maximum=1)
 
@@ -127,6 +138,9 @@ def get_observation_processing_layer_creator(quantile_file_dir=None,
 
   def observation_processing_layer(obs_spec):
     """Creates the layer to process observation given obs_spec."""
+    if obs_spec.name == 'instructions_and_mapping':
+      return process_instruction_features(get_opcode_count(), get_num_registers(), get_num_instructions())
+
     if obs_spec.name in ('mask', 'nr_urgent'):
       return tf.keras.layers.Lambda(feature_ops.discard_fn)
 
@@ -175,9 +189,6 @@ def get_observation_processing_layer_creator(quantile_file_dir=None,
 
       return tf.keras.layers.Lambda(use_def_density_processing_fn)
     
-    if obs_spec.name == 'instructions_and_mapping':
-      return process_instruction_features(get_opcode_count(), get_num_registers(), get_num_instructions())
-
     if obs_spec.name == 'progress':
 
       def progress_processing_fn(obs):
