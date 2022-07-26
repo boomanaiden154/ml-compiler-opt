@@ -64,8 +64,12 @@ def get_regalloc_signature_spec():
       name='index_to_evict',
       minimum=0,
       maximum=num_registers - 1)
+  
+  multi_input_preprocessing_layers = [
+    ('testing1', 'testing2')
+  ]
 
-  return time_step_spec, action_spec
+  return time_step_spec, action_spec, multi_input_preprocessing_layers
   # LINT.ThenChange(.../rl/regalloc/sparse_bucket_config.pbtxt)
 
 

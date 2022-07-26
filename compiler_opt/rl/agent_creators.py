@@ -87,6 +87,7 @@ def create_agent(agent_name: constant.AgentName,
                  action_spec: types.NestedTensorSpec,
                  preprocessing_layer_creator: Callable[[types.TensorSpec],
                                                        tf.keras.layers.Layer],
+                 multi_input_preprocessing_layers,
                  policy_network: types.Network) -> TFAgent:
   """Creates a tfa.agents.TFAgent object.
 
@@ -109,6 +110,16 @@ def create_agent(agent_name: constant.AgentName,
 
   preprocessing_layers = tf.nest.map_structure(preprocessing_layer_creator,
                                                time_step_spec.observation)
+  preprocessing_layers = []
+  completed_mulinput_preprocessing_layers = {}
+  for input_tensor in time_step_spec.observation:
+    for multi_input_preprocessing_layer_spec in multi_input_preprocessing_layers:
+      if input_tensor in multi_input_preprocessing_layer_spec and input_tensor not in completed_mulinput_preprocessing_layers:
+        preprocessing_layers.append(preprocessing_layer_creator(multi_input_preprocessing_layer_spec))
+        completed_mulinput_preprocessing_layers[multi_input_preprocessing_layer_spec] = True
+      continue
+    preprocessing_layers.append(preprocessing_layer_creator(input_tensor))
+
 
   if agent_name == constant.AgentName.BEHAVIORAL_CLONE:
     return _create_behavioral_cloning_agent(time_step_spec, action_spec,
