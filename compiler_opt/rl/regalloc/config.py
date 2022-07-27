@@ -58,16 +58,10 @@ class process_instruction_features(tf.keras.Model):
 
   def call(self, inputs):
     # The first row is the instructions, and all rows afterwards compose the mapping matrix
-    instruction_opcodes = tf.slice(inputs, begin=[0, 0, 0], size=[-1, 1, self.instruction_count])
-    instruction_opcodes = tf.reshape(instruction_opcodes, [-1, self.instruction_count])
-    mapping_matrix = tf.slice(inputs, begin=[0, 1, 0], size=[-1, self.register_count, self.instruction_count])
-    max_tensor = tf.math.reduce_max(mapping_matrix)
-    # indexes need to be in the interval [0,100), but the TensorSpec has a max value of num_opcodes
-    # During initalization, some random numbers are thrown through with the type tf.EagerTensor,
-    # so this catches them and sets them to 1 so that nothing errors out before 
-    if type(mapping_matrix) is not tf.Tensor:
-      mapping_matrix = tf.constant(1, shape=(1, self.register_count, self.instruction_count))
+    instruction_opcodes = inputs[0]
+    mapping_matrix = inputs[1]
     instruction_embeddings = self.embedding_layer(instruction_opcodes)
+
     # This should result in a batch_size * register_count * instruction_count * instruction_dimensions sized tensor
     mapped_embeddings = tf.gather(instruction_embeddings, mapping_matrix, batch_dims=1)
 
@@ -104,9 +98,12 @@ def get_regalloc_signature_spec():
                        'end_bb_freq_by_max', 'hottest_bb_freq_by_max',
                        'liverange_size', 'use_def_density', 'nr_defs_and_uses',
                        'nr_broken_hints', 'nr_urgent', 'nr_rematerializable')))
-  observation_spec['instructions_and_indices'] = tensor_spec.BoundedTensorSpec(
-      dtype=tf.int64, shape=(num_registers + 1, num_instructions), 
-      name='instructions_and_indices', minimum=0, maximum=num_opcodes)
+  observation_spec['instructions'] = tensor_spec.BoundedTensorSpec(
+      dtype=tf.int64, shape=(num_instructions), 
+      name='instructions', minimum=0, maximum=num_opcodes)
+  observation_spec['instructions_mapping'] = tensor_spec.BoundedTensorSpec(
+      dtype=tf.int64, shape=(num_registers, num_instructions),
+      name='instructions_mapping', minimum=0, maximum=num_instructions)
   observation_spec['progress'] = tensor_spec.BoundedTensorSpec(
       dtype=tf.float32, shape=(), name='progress', minimum=0, maximum=1)
 
@@ -121,7 +118,7 @@ def get_regalloc_signature_spec():
       maximum=num_registers - 1)
   
   multi_input_preprocessing_layers = [
-    ('testing1', 'testing2')
+    ('instructions', 'instructions_mapping')
   ]
 
   return time_step_spec, action_spec, multi_input_preprocessing_layers
@@ -138,6 +135,9 @@ def get_observation_processing_layer_creator(quantile_file_dir=None,
 
   def observation_processing_layer(obs_spec):
     """Creates the layer to process observation given obs_spec."""
+    if obs_spec == ('instructions', 'instructions_mapping'):
+      return process_instruction_features(get_opcode_count(), get_num_registers(), get_num_instructions())
+
     if obs_spec.name in ('mask', 'nr_urgent'):
       return tf.keras.layers.Lambda(feature_ops.discard_fn)
 
@@ -185,9 +185,6 @@ def get_observation_processing_layer_creator(quantile_file_dir=None,
         return tf.concat(features, axis=-1)
 
       return tf.keras.layers.Lambda(use_def_density_processing_fn)
-    
-    if obs_spec.name == 'instructions_and_indices':
-      return process_instruction_features(get_opcode_count(), get_num_registers(), get_num_instructions())
 
     if obs_spec.name == 'progress':
 
