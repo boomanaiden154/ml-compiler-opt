@@ -87,16 +87,17 @@ class RegAllocEncodingNetwork(encoding_network.EncodingNetwork):
         flat_preprocessing_layers = []
         preprocessing_nest = {}
         for layer in preprocessing_layers:
-          preprocessing_nest[layer] = len(flat_preprocessing_layers)
           flat_preprocessing_layers.append(
-              _copy_layer(preprocessing_layers[layer]))
+            _copy_layer(preprocessing_layers[layer]))
+          if not isinstance(layer, tuple):
+            layer = (layer,)
+          preprocessing_nest[layer] = len(flat_preprocessing_layers) - 1
       else:
         flat_preprocessing_layers = [
-            _copy_layer(layer)
-            for layer in tf.nest.flatten(preprocessing_layers)
+            _copy_layer(layer) for layer in tf.nest.flatten(preprocessing_layers)
         ]
         preprocessing_nest = tf.nest.map_structure(lambda l: None,
-                                                   preprocessing_layers)
+                                                     preprocessing_layers)
       # Assert shallow structure is the same. This verifies preprocessing
       # layers can be applied on expected input nests.
       if isinstance(preprocessing_layers, dict):
@@ -108,12 +109,16 @@ class RegAllocEncodingNetwork(encoding_network.EncodingNetwork):
           else:
             layer_inputs.append(layer)
         if len(layer_inputs) != len(input_tensor_spec):
-          raise ValueError('the number of inputs to preprocessing layers needs'
-                           'to be equal to the number if input tensors')
+          raise ValueError(
+            'the number of inputs to preprocessing layers needs'
+            'to be equal to the number if input tensors'
+          )
         for input in layer_inputs:
           if input not in input_tensor_spec:
-            raise ValueError('a preprocessing layer requires an input tensor'
-                             f'{input}, but it is not present')
+            raise ValueError(
+              'a preprocessing layer requires an input tensor'
+              f'{input}, but it is not present'
+            )
       else:
         input_nest = input_tensor_spec
         # Given the flatten on preprocessing_layers above we need to make sure
@@ -144,8 +149,8 @@ class RegAllocEncodingNetwork(encoding_network.EncodingNetwork):
       elif conv_type == '1d':
         conv_layer_type = tf.keras.layers.Conv1D
       else:
-        raise ValueError('unsupported conv type of %s. Use 1d or 2d' %
-                         (conv_type))
+        raise ValueError('unsupported conv type of %s. Use 1d or 2d' % (
+            conv_type))
 
       for config in conv_layer_params:
         if len(config) == 4:
@@ -207,9 +212,7 @@ class RegAllocEncodingNetwork(encoding_network.EncodingNetwork):
     super(encoding_network.EncodingNetwork, self).__init__(
         input_tensor_spec=input_tensor_spec, state_spec=(), name=name)
 
-    # Set preprocessing_nest directly so that keras doesn't do any
-    # processing to it and error out when tf.nest.flatten is called
-    self.__dict__['_preprocessing_nest'] = preprocessing_nest
+    self._preprocessing_nest = preprocessing_nest
     self._flat_preprocessing_layers = flat_preprocessing_layers
     self._preprocessing_combiner = preprocessing_combiner
     self._postprocessing_layers = layers
@@ -221,8 +224,8 @@ class RegAllocEncodingNetwork(encoding_network.EncodingNetwork):
     del step_type  # unused.
 
     if self._batch_squash:
-      outer_rank = nest_utils.get_outer_rank(observation,
-                                             self.input_tensor_spec)
+      outer_rank = nest_utils.get_outer_rank(
+          observation, self.input_tensor_spec)
       batch_squash = utils.BatchSquash(outer_rank)
       observation = tf.nest.map_structure(batch_squash.flatten, observation)
 
@@ -233,17 +236,16 @@ class RegAllocEncodingNetwork(encoding_network.EncodingNetwork):
       if isinstance(self._preprocessing_nest, dict):
         for layer_name in self._preprocessing_nest:
           preprocessing_layer = self._flat_preprocessing_layers[
-              self._preprocessing_nest[layer_name]]
-          if isinstance(layer_name, tuple):
-            print("called layer on tuple")
-            needed_inputs = []
-            for input_name in layer_name:
-              needed_inputs.append(observation[input_name])
-            processed.append(
-                preprocessing_layer(needed_inputs, training=training))
+            self._preprocessing_nest[layer_name]]
+          needed_inputs = []
+          for input_name in layer_name:
+            needed_inputs.append(observation[input_name])
+          if len(layer_name) == 1:
+            processed.append(preprocessing_layer(needed_inputs[0],
+                                                 training=training))
           else:
-            processed.append(
-                preprocessing_layer(observation[layer_name], training=training))
+            processed.append(preprocessing_layer(needed_inputs,
+                                                 training=training))
       else:
         for obs, layer in zip(
             nest.flatten_up_to(self._preprocessing_nest, observation),

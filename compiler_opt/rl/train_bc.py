@@ -59,13 +59,14 @@ def train_eval(agent_name=constant.AgentName.BEHAVIORAL_CLONE,
   root_dir = os.path.expanduser(_ROOT_DIR.value)
   root_dir = os.path.normpath(root_dir)
   problem_config = registry.get_configuration()
-  time_step_spec, action_spec = problem_config.get_signature_spec()
+  time_step_spec, action_spec, multi_input_preprocessing_layers = problem_config.get_signature_spec()
   preprocessing_layer_creator = problem_config.get_preprocessing_layer_creator()
 
   # Initialize trainer and policy saver.
   tf_agent: TFAgent = agent_creators.create_agent(agent_name, time_step_spec,
                                                   action_spec,
-                                                  preprocessing_layer_creator)
+                                                  preprocessing_layer_creator,
+                                                  multi_input_preprocessing_layers)
   llvm_trainer = trainer.Trainer(root_dir=root_dir, agent=tf_agent)
   policy_dict: Dict[str, TFPolicy] = {
       'saved_policy': tf_agent.policy,
@@ -93,7 +94,7 @@ def train_eval(agent_name=constant.AgentName.BEHAVIORAL_CLONE,
 def main(_):
   gin.parse_config_files_and_bindings(
       _GIN_FILES.value, bindings=_GIN_BINDINGS.value, skip_unknown=False)
-  logging.info(gin.config_str())
+  #logging.info(gin.config_str())
 
   train_eval()
 

@@ -41,13 +41,6 @@ RandomNetworkDistillation.fc_layer_params = [32, 128]
 RandomNetworkDistillation.initial_intrinsic_reward_scale = 1.0
 RandomNetworkDistillation.half_decay_steps = 10000
 
-create_agent.policy_network = @regalloc_network.RegAllocNetwork
-
-RegAllocNetwork.preprocessing_combiner=@tf.keras.layers.Concatenate()
-RegAllocNetwork.fc_layer_params=(120, 60)
-RegAllocNetwork.dropout_layer_params=None
-RegAllocNetwork.activation_fn=@tf.keras.activations.relu
-
 ConstantValueNetwork.constant_output_val=0
 
 tf.train.AdamOptimizer.learning_rate = 0.0003

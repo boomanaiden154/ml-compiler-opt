@@ -28,6 +28,8 @@ from tf_agents.typing import types
 from compiler_opt.rl import constant
 from compiler_opt.rl import constant_value_network
 
+from absl import logging
+
 
 def _create_behavioral_cloning_agent(time_step_spec: types.NestedTensorSpec,
                                      action_spec: types.NestedTensorSpec,
@@ -108,28 +110,40 @@ def create_agent(agent_name: constant.AgentName,
   assert policy_network is not None
   assert agent_name is not None
 
-  preprocessing_layers = tf.nest.map_structure(preprocessing_layer_creator,
-                                               time_step_spec.observation)
-  preprocessing_layers = []
+  #preprocessing_layers = tf.nest.map_structure(preprocessing_layer_creator,
+  #                                             time_step_spec.observation)
+  preprocessing_layers = {}
   completed_mulinput_preprocessing_layers = {}
   for input_tensor in time_step_spec.observation:
     for multi_input_preprocessing_layer_spec in multi_input_preprocessing_layers:
-      if input_tensor in multi_input_preprocessing_layer_spec and input_tensor not in completed_mulinput_preprocessing_layers:
-        preprocessing_layers.append(preprocessing_layer_creator(multi_input_preprocessing_layer_spec))
+      if input_tensor in multi_input_preprocessing_layer_spec and multi_input_preprocessing_layer_spec not in completed_mulinput_preprocessing_layers:
+        preprocessing_layers[multi_input_preprocessing_layer_spec] = preprocessing_layer_creator(multi_input_preprocessing_layer_spec)
         completed_mulinput_preprocessing_layers[multi_input_preprocessing_layer_spec] = True
-      continue
-    preprocessing_layers.append(preprocessing_layer_creator(input_tensor))
+        break
+    for multi_input_preprocessing_layer_spec in multi_input_preprocessing_layers:
+      if input_tensor in multi_input_preprocessing_layer_spec and multi_input_preprocessing_layer_spec in completed_mulinput_preprocessing_layers:
+        break
+    else:
+      preprocessing_layers[input_tensor] = preprocessing_layer_creator(input_tensor)
+  
+  actual_preprocessing_layers = {}
+  for layer in preprocessing_layers:
+    if not isinstance(layer, tuple):
+      layer_key = (layer,)
+    else:
+      layer_key = layer
+    actual_preprocessing_layers[layer_key] = preprocessing_layers[layer]
 
 
   if agent_name == constant.AgentName.BEHAVIORAL_CLONE:
     return _create_behavioral_cloning_agent(time_step_spec, action_spec,
-                                            preprocessing_layers,
+                                            actual_preprocessing_layers,
                                             policy_network)
   elif agent_name == constant.AgentName.DQN:
-    return _create_dqn_agent(time_step_spec, action_spec, preprocessing_layers,
+    return _create_dqn_agent(time_step_spec, action_spec, actual_preprocessing_layers,
                              policy_network)
   elif agent_name == constant.AgentName.PPO:
-    return _create_ppo_agent(time_step_spec, action_spec, preprocessing_layers,
+    return _create_ppo_agent(time_step_spec, action_spec, actual_preprocessing_layers,
                              policy_network)
   else:
     raise ValueError(f'Unknown agent: {agent_name}')
