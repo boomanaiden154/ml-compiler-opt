@@ -34,7 +34,7 @@ def get_num_instructions():
 
 class process_instruction_features(tf.keras.Model):
 
-  def __init__(self, opcode_count, register_count, instruction_count, embedding_dimensions=16):
+  def __init__(self, opcode_count, register_count, instruction_count, embedding_dimensions=16, initalizer="uniform"):
     super().__init__()
     self.opcode_count = opcode_count
     self.register_count = register_count
@@ -42,7 +42,8 @@ class process_instruction_features(tf.keras.Model):
     self.embedding_dimensions = embedding_dimensions
     self.embedding_layer = tf.keras.layers.Embedding(self.opcode_count,
                                                      self.embedding_dimensions,
-                                                     input_length=self.instruction_count)
+                                                     input_length=self.instruction_count,
+                                                     embeddings_initializer=initalizer)
 
   def get_config(self):
     return {

@@ -22,6 +22,7 @@ from compiler_opt.rl.regalloc import config
 from compiler_opt.rl.regalloc import regalloc_network
 
 from compiler_opt.rl.agent_creators import get_preprocessing_layers
+from compiler_opt.rl.regalloc.config import process_instruction_features
 
 
 def _observation_processing_layer(obs_spec):
@@ -37,7 +38,6 @@ def _observation_processing_layer(obs_spec):
 
 
 class RegAllocNetworkTest(tf.test.TestCase):
-
   def setUp(self):
     time_step_spec, action_spec, multi_input_preprocessing_layers = config.get_regalloc_signature_spec()
     random_observation = tensor_spec.sample_spec_nest(
@@ -69,6 +69,24 @@ class RegAllocNetworkTest(tf.test.TestCase):
     self.assertAllInRange(action_distributions.mode(), 0,
                           config.get_num_registers() - 1)
 
+class ProcessInstructionFeaturesTest(tf.test.TestCase):
+  def setUp(self):
+    self._instruction_processor = process_instruction_features(10, 2, 2, 4, "ones")
+    super().setUp()
+
+  def testOutputDimensions(self):
+    instructions_input = tf.constant([[0,1]], dtype=tf.int64)
+    register_mapping = tf.constant([[[1,1],[1,1]]], dtype=tf.int64)
+    output = self._instruction_processor.call([instructions_input, register_mapping])
+    # There is a batch dimension in here
+    self.assertEqual([1, 2, 4], output.shape.as_list())
+
+  def testProcesserOutput(self):
+    instructions_input = tf.constant([[0,1]], dtype=tf.int64)
+    register_mapping = tf.constant([[[0,1], [0,1]]], dtype=tf.int64)
+    output = self._instruction_processor.call([instructions_input, register_mapping])
+    expected_output = tf.constant([[[2,2,2,2],[2,2,2,2]]], dtype=tf.float32)
+    self.assertAllEqual(output, expected_output)
 
 if __name__ == '__main__':
   tf.test.main()
