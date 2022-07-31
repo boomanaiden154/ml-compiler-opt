@@ -22,7 +22,7 @@ import numpy as np
 from tf_agents.trajectories import trajectory
 
 # Deadline for data collection.
-DEADLINE_IN_SECONDS = 30
+DEADLINE_IN_SECONDS = 90
 
 # We don't wait for all data collection to finish --- it continues if either of
 # the wait_termination_conditions is met.
