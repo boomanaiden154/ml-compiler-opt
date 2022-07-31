@@ -131,7 +131,8 @@ def get_observation_processing_layer_creator(quantile_file_dir=None,
                                              with_z_score_normalization=True,
                                              eps=1e-8):
   """Wrapper for observation_processing_layer."""
-  quantile_map = feature_ops.build_quantile_map(quantile_file_dir)
+  if quantile_file_dir:
+    quantile_map = feature_ops.build_quantile_map(quantile_file_dir)
 
   def observation_processing_layer(obs_spec):
     """Creates the layer to process observation given obs_spec."""
@@ -148,7 +149,7 @@ def get_observation_processing_layer_creator(quantile_file_dir=None,
       return tf.keras.layers.Embedding(7, 4)
 
     normalize_fn = log_normalize_fn = None
-    if obs_spec not in get_nonnormalized_features():
+    if obs_spec not in get_nonnormalized_features() and quantile_file_dir:
       quantile = quantile_map[obs_spec]
 
       first_non_zero = 0
@@ -167,6 +168,9 @@ def get_observation_processing_layer_creator(quantile_file_dir=None,
           with_z_score_normalization,
           eps,
           preprocessing_fn=lambda x: tf.math.log(x + first_non_zero))
+    elif not quantile_file_dir:
+      normalize_fn = feature_ops.identity_fn
+      log_normalize_fn = feature_ops.identity_fn
 
     if obs_spec in ['nr_rematerializable', 'nr_broken_hints']:
       return tf.keras.layers.Lambda(normalize_fn)

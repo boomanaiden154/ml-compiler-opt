@@ -82,6 +82,22 @@ def _create_ppo_agent(time_step_spec: types.NestedTensorSpec,
       actor_net=actor_network,
       value_net=critic_network)
 
+def get_preprocessing_layers(time_step_spec, multi_input_preprocessing_layers, preprocessing_layer_creator):
+  preprocessing_layers = {}
+  completed_mulinput_preprocessing_layers = {}
+  for input_tensor in time_step_spec.observation:
+    for multi_input_preprocessing_layer_spec in multi_input_preprocessing_layers:
+      if input_tensor in multi_input_preprocessing_layer_spec and multi_input_preprocessing_layer_spec not in completed_mulinput_preprocessing_layers:
+        preprocessing_layers[multi_input_preprocessing_layer_spec] = preprocessing_layer_creator(multi_input_preprocessing_layer_spec)
+        completed_mulinput_preprocessing_layers[multi_input_preprocessing_layer_spec] = True
+        break
+    for multi_input_preprocessing_layer_spec in multi_input_preprocessing_layers:
+      if input_tensor in multi_input_preprocessing_layer_spec and multi_input_preprocessing_layer_spec in completed_mulinput_preprocessing_layers:
+        break
+    else:
+      preprocessing_layers[input_tensor] = preprocessing_layer_creator(input_tensor)
+  return preprocessing_layers
+
 
 @gin.configurable
 def create_agent(agent_name: constant.AgentName,
@@ -110,21 +126,7 @@ def create_agent(agent_name: constant.AgentName,
   assert policy_network is not None
   assert agent_name is not None
 
-  #preprocessing_layers = tf.nest.map_structure(preprocessing_layer_creator,
-  #                                             time_step_spec.observation)
-  preprocessing_layers = {}
-  completed_mulinput_preprocessing_layers = {}
-  for input_tensor in time_step_spec.observation:
-    for multi_input_preprocessing_layer_spec in multi_input_preprocessing_layers:
-      if input_tensor in multi_input_preprocessing_layer_spec and multi_input_preprocessing_layer_spec not in completed_mulinput_preprocessing_layers:
-        preprocessing_layers[multi_input_preprocessing_layer_spec] = preprocessing_layer_creator(multi_input_preprocessing_layer_spec)
-        completed_mulinput_preprocessing_layers[multi_input_preprocessing_layer_spec] = True
-        break
-    for multi_input_preprocessing_layer_spec in multi_input_preprocessing_layers:
-      if input_tensor in multi_input_preprocessing_layer_spec and multi_input_preprocessing_layer_spec in completed_mulinput_preprocessing_layers:
-        break
-    else:
-      preprocessing_layers[input_tensor] = preprocessing_layer_creator(input_tensor)
+  preprocessing_layers = get_preprocessing_layers(time_step_spec, multi_input_preprocessing_layers, preprocessing_layer_creator)
   
   actual_preprocessing_layers = {}
   for layer in preprocessing_layers:

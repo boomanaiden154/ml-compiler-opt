@@ -21,6 +21,8 @@ from tf_agents.specs import tensor_spec
 from compiler_opt.rl.regalloc import config
 from compiler_opt.rl.regalloc import regalloc_network
 
+from compiler_opt.rl.agent_creators import get_preprocessing_layers
+
 
 def _observation_processing_layer(obs_spec):
   """Creates the layer to process observation given obs_spec."""
@@ -37,17 +39,20 @@ def _observation_processing_layer(obs_spec):
 class RegAllocNetworkTest(tf.test.TestCase):
 
   def setUp(self):
-    time_step_spec, action_spec = config.get_regalloc_signature_spec()
+    time_step_spec, action_spec, multi_input_preprocessing_layers = config.get_regalloc_signature_spec()
     random_observation = tensor_spec.sample_spec_nest(
         time_step_spec, outer_dims=(2, 3))
     super().setUp()
     self._time_step_spec = time_step_spec
     self._action_spec = action_spec
     self._random_observation = random_observation
+    self._multi_input_preprocessing_layers = multi_input_preprocessing_layers
 
   def testBuilds(self):
-    layers = tf.nest.map_structure(_observation_processing_layer,
-                                   self._time_step_spec.observation)
+    preprocessing_layer_creator = config.get_observation_processing_layer_creator()
+    layers = get_preprocessing_layers(self._time_step_spec, 
+                                      self._multi_input_preprocessing_layers,
+                                      preprocessing_layer_creator)
 
     net = regalloc_network.RegAllocNetwork(
         self._time_step_spec.observation,
