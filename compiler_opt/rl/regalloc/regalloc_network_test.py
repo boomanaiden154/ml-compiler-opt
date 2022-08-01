@@ -85,7 +85,7 @@ class ProcessInstructionFeaturesTest(tf.test.TestCase):
     instructions_input = tf.constant([[0,1]], dtype=tf.int64)
     register_mapping = tf.constant([[[0,1], [0,1]]], dtype=tf.int64)
     output = self._instruction_processor.call([instructions_input, register_mapping])
-    expected_output = tf.constant([[[2,2,2,2],[2,2,2,2]]], dtype=tf.float32)
+    expected_output = tf.constant([[[1,1,1,1],[1,1,1,1]]], dtype=tf.float32)
     self.assertAllEqual(output, expected_output)
 
 if __name__ == '__main__':

@@ -61,13 +61,17 @@ class process_instruction_features(tf.keras.Model):
     # The first row is the instructions, and all rows afterwards compose the mapping matrix
     instruction_opcodes = inputs[0]
     mapping_matrix = inputs[1]
-    instruction_embeddings = self.embedding_layer(instruction_opcodes)
 
-    # This should result in a batch_size * register_count * instruction_count * instruction_dimensions sized tensor
-    mapped_embeddings = tf.gather(instruction_embeddings, mapping_matrix, batch_dims=1)
+    mapped_opcodes = tf.gather(instruction_opcodes, mapping_matrix, batch_dims=1)
+    mapped_embeddings = self.embedding_layer(mapped_opcodes)
+    mapped_embeddings_mask = tf.cast(mapped_opcodes > 0, tf.float32)
+    mapped_embeddings_mask = tf.expand_dims(mapped_embeddings_mask, axis=-1)
+    mapped_embeddings_mask = tf.repeat(mapped_embeddings_mask, repeats=self.embedding_dimensions, axis=-1)
+    mapped_embeddings_mask = tf.add(mapped_embeddings_mask, 1e-12)
+    mapped_embeddings *= mapped_embeddings_mask
 
     # Should result in a batch_size * register_count * instruction_dimensions sized tensor
-    summed_embeddings = tf.reduce_sum(mapped_embeddings, axis=2)
+    summed_embeddings = tf.reduce_sum(mapped_embeddings, axis=2) / tf.reduce_sum(mapped_embeddings_mask, axis=2)
     return summed_embeddings
 
 # pylint: disable=g-complex-comprehension
