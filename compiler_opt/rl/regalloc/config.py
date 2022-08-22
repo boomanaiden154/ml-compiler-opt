@@ -79,24 +79,7 @@ def get_regalloc_signature_spec():
 
   observation_spec = dict(
       (key, tf.TensorSpec(dtype=tf.int64, shape=(num_registers), name=key))
-      for key in ('mask', 'is_hint', 'is_local', 'is_free'))
-  observation_spec.update(
-      dict((key,
-            tensor_spec.BoundedTensorSpec(
-                dtype=tf.int64,
-                shape=(num_registers),
-                name=key,
-                minimum=0,
-                maximum=6)) for key in ('max_stage', 'min_stage')))
-  observation_spec.update(
-      dict((key,
-            tf.TensorSpec(dtype=tf.float32, shape=(num_registers), name=key))
-           for key in ('weighed_reads_by_max', 'weighed_writes_by_max',
-                       'weighed_read_writes_by_max', 'weighed_indvars_by_max',
-                       'hint_weights_by_max', 'start_bb_freq_by_max',
-                       'end_bb_freq_by_max', 'hottest_bb_freq_by_max',
-                       'liverange_size', 'use_def_density', 'nr_defs_and_uses',
-                       'nr_broken_hints', 'nr_urgent', 'nr_rematerializable')))
+      for key in ('mask'))
   observation_spec['instructions'] = tensor_spec.BoundedTensorSpec(
       dtype=tf.int64, shape=(num_instructions), 
       name='instructions', minimum=0, maximum=num_opcodes)
@@ -137,53 +120,16 @@ def get_observation_processing_layer_creator(quantile_file_dir=None,
     if obs_spec == ('instructions', 'instructions_mapping'):
       return process_instruction_features(get_opcode_count(), get_num_instructions(), get_num_instructions())
 
-    if obs_spec in ('mask', 'nr_urgent'):
+    if obs_spec in ('mask'):
       return tf.keras.layers.Lambda(feature_ops.discard_fn)
 
-    if obs_spec in ('is_hint', 'is_local', 'is_free'):
-      return tf.keras.layers.Lambda(feature_ops.identity_fn)
-
-    if obs_spec in ('max_stage', 'min_stage'):
-      return tf.keras.layers.Embedding(7, 4)
-
-    normalize_fn = log_normalize_fn = None
+    normalize_fn = None
     if obs_spec not in get_nonnormalized_features():
       quantile = quantile_map[obs_spec]
-
-      first_non_zero = 0
-      for x in quantile:
-        if x > 0:
-          first_non_zero = x
-          break
 
       normalize_fn = feature_ops.get_normalize_fn(quantile, with_sqrt,
                                                   with_z_score_normalization,
                                                   eps)
-      log_normalize_fn = feature_ops.get_normalize_fn(
-          quantile,
-          with_sqrt,
-          with_z_score_normalization,
-          eps,
-          preprocessing_fn=lambda x: tf.math.log(x + first_non_zero))
-
-    if obs_spec in ['nr_rematerializable', 'nr_broken_hints']:
-      return tf.keras.layers.Lambda(normalize_fn)
-
-    if not isinstance(obs_spec, tuple):
-      if obs_spec in ('liverange_size', 'nr_defs_and_uses'
-                          ) or obs_spec.endswith('by_max'):
-        return tf.keras.layers.Lambda(log_normalize_fn)
-
-    if obs_spec == 'use_def_density':
-
-      def use_def_density_processing_fn(obs):
-        features = [tf.where(tf.math.is_inf(tf.expand_dims(obs, -1)), 1.0, 0.0)]
-        obs = tf.where(tf.math.is_inf(obs), 1.0, obs)
-        features.append(log_normalize_fn(obs))
-        # pylint: disable=unexpected-keyword-arg
-        return tf.concat(features, axis=-1)
-
-      return tf.keras.layers.Lambda(use_def_density_processing_fn)
     
     if obs_spec == 'progress':
 
