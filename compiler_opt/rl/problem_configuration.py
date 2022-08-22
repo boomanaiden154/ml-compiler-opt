@@ -108,7 +108,7 @@ class ProblemConfiguration(metaclass=abc.ABCMeta):
   # return ['-fprofile-sample-use=/path/to/gwp.afdo',
   #  '-fprofile-remapping-file=/path/to/prof_remap.txt']
   def flags_to_add(self) -> Tuple[str, ...]:
-    return ()
+    return ('-mllvm', '-regalloc-enable-development-features')
 
   # List of flags to remove from clang compilation command. The flag names
   # should match the actual flags provided to clang.'
