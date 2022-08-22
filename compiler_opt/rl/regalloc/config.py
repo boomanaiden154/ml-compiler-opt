@@ -148,7 +148,7 @@ def get_observation_processing_layer_creator(quantile_file_dir=None,
 
     normalize_fn = log_normalize_fn = None
     if obs_spec not in get_nonnormalized_features():
-      quantile = quantile_map[obs_spec.name]
+      quantile = quantile_map[obs_spec]
 
       first_non_zero = 0
       for x in quantile:
@@ -171,7 +171,7 @@ def get_observation_processing_layer_creator(quantile_file_dir=None,
 
     if not isinstance(obs_spec, tuple):
       if obs_spec in ('liverange_size', 'nr_defs_and_uses'
-                          ) or obs_spec.name.endswith('by_max'):
+                          ) or obs_spec.endswith('by_max'):
         return tf.keras.layers.Lambda(log_normalize_fn)
 
     if obs_spec == 'use_def_density':
@@ -206,3 +206,6 @@ def get_nonnormalized_features():
           'is_free', 'max_stage',
           'min_stage', 'reward',
           'instructions', 'instructions_mapping']
+
+def flags_to_add():
+  return ('-mllvm', '-regalloc-enable-development-features')
