@@ -14,7 +14,7 @@
 # limitations under the License.
 """Register allocation training config."""
 
-from numpy import dtype, maximum
+from numpy import dtype, maximum, minimum
 import gin
 import tensorflow as tf
 from tf_agents.specs import tensor_spec
@@ -59,9 +59,9 @@ class process_instruction_features(tf.keras.Model):
   def call(self, inputs):
     # The first row is the instructions, and all rows afterwards compose the binary
     # mapping matrix
-    instruction_opcodes = tf.slice(inputs, begin=[0, 0, 0], size=[-1, 1, self.instruction_count])
+    instruction_opcodes = inputs[0]
     instruction_opcodes = tf.reshape(instruction_opcodes, [-1, self.instruction_count])
-    binary_mapping_matrix = tf.slice(inputs, begin=[0, 1, 0], size=[-1, self.register_count, self.instruction_count])
+    binary_mapping_matrix = inputs[1]
     binary_mapping_matrix_casted = tf.cast(binary_mapping_matrix, tf.float32)
     instruction_embeddings = self.embedding_layer(instruction_opcodes)
 
@@ -97,9 +97,12 @@ def get_regalloc_signature_spec():
                        'end_bb_freq_by_max', 'hottest_bb_freq_by_max',
                        'liverange_size', 'use_def_density', 'nr_defs_and_uses',
                        'nr_broken_hints', 'nr_urgent', 'nr_rematerializable')))
-  observation_spec['instructions_and_mapping'] = tensor_spec.BoundedTensorSpec(
-      dtype=tf.int64, shape=(num_registers + 1, num_instructions), 
-      name='instructions_and_mapping', minimum=0, maximum=num_opcodes)
+  observation_spec['instructions'] = tensor_spec.BoundedTensorSpec(
+      dtype=tf.int64, shape=(num_instructions), 
+      name='instructions', minimum=0, maximum=num_opcodes)
+  observation_spec['instructions_mapping'] = tensor_spec.BoundedTensorSpec(
+    dtype=tf.int64, shape=(num_registers, num_instructions),
+    name='instructions_mapping', minimum=0, maximum=1)
   observation_spec['progress'] = tensor_spec.BoundedTensorSpec(
       dtype=tf.float32, shape=(), name='progress', minimum=0, maximum=1)
 
@@ -112,8 +115,12 @@ def get_regalloc_signature_spec():
       name='index_to_evict',
       minimum=0,
       maximum=num_registers - 1)
+  
+  multi_input_preprocessing_layers = [
+    ('instructions', 'instructions_mapping')
+  ]
 
-  return time_step_spec, action_spec
+  return time_step_spec, action_spec, multi_input_preprocessing_layers
   # LINT.ThenChange(.../rl/regalloc/sparse_bucket_config.pbtxt)
 
 
@@ -127,17 +134,20 @@ def get_observation_processing_layer_creator(quantile_file_dir=None,
 
   def observation_processing_layer(obs_spec):
     """Creates the layer to process observation given obs_spec."""
-    if obs_spec.name in ('mask', 'nr_urgent'):
+    if obs_spec == ('instructions', 'instructions_mapping'):
+      return process_instruction_features(get_opcode_count(), get_num_instructions(), get_num_instructions())
+
+    if obs_spec in ('mask', 'nr_urgent'):
       return tf.keras.layers.Lambda(feature_ops.discard_fn)
 
-    if obs_spec.name in ('is_hint', 'is_local', 'is_free'):
+    if obs_spec in ('is_hint', 'is_local', 'is_free'):
       return tf.keras.layers.Lambda(feature_ops.identity_fn)
 
-    if obs_spec.name in ('max_stage', 'min_stage'):
+    if obs_spec in ('max_stage', 'min_stage'):
       return tf.keras.layers.Embedding(7, 4)
 
     normalize_fn = log_normalize_fn = None
-    if obs_spec.name not in get_nonnormalized_features():
+    if obs_spec not in get_nonnormalized_features():
       quantile = quantile_map[obs_spec.name]
 
       first_non_zero = 0
@@ -156,14 +166,15 @@ def get_observation_processing_layer_creator(quantile_file_dir=None,
           eps,
           preprocessing_fn=lambda x: tf.math.log(x + first_non_zero))
 
-    if obs_spec.name in ['nr_rematerializable', 'nr_broken_hints']:
+    if obs_spec in ['nr_rematerializable', 'nr_broken_hints']:
       return tf.keras.layers.Lambda(normalize_fn)
 
-    if obs_spec.name in ('liverange_size', 'nr_defs_and_uses'
-                        ) or obs_spec.name.endswith('by_max'):
-      return tf.keras.layers.Lambda(log_normalize_fn)
+    if not isinstance(obs_spec, tuple):
+      if obs_spec in ('liverange_size', 'nr_defs_and_uses'
+                          ) or obs_spec.name.endswith('by_max'):
+        return tf.keras.layers.Lambda(log_normalize_fn)
 
-    if obs_spec.name == 'use_def_density':
+    if obs_spec == 'use_def_density':
 
       def use_def_density_processing_fn(obs):
         features = [tf.where(tf.math.is_inf(tf.expand_dims(obs, -1)), 1.0, 0.0)]
@@ -174,10 +185,7 @@ def get_observation_processing_layer_creator(quantile_file_dir=None,
 
       return tf.keras.layers.Lambda(use_def_density_processing_fn)
     
-    if obs_spec.name == 'instructions_and_mapping':
-      return process_instruction_features(get_opcode_count(), get_num_registers(), get_num_instructions())
-
-    if obs_spec.name == 'progress':
+    if obs_spec == 'progress':
 
       def progress_processing_fn(obs):
         obs = tf.expand_dims(obs, -1)
@@ -197,4 +205,4 @@ def get_nonnormalized_features():
           'is_hint', 'is_local',
           'is_free', 'max_stage',
           'min_stage', 'reward',
-          'instructions_and_mapping']
+          'instructions', 'instructions_mapping']

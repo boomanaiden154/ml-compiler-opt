@@ -24,14 +24,248 @@ from tf_agents.networks import network
 from tf_agents.typing import types
 from tf_agents.utils import nest_utils
 
+from absl import logging
+
+from tensorflow.python.util import nest
+from tf_agents.keras_layers import permanent_variable_rate_dropout
+from tf_agents.networks import utils
+
+CONV_TYPE_2D = '2d'
+CONV_TYPE_1D = '1d'
+
+def _copy_layer(layer):
+  """Create a copy of a Keras layer with identical parameters.
+  The new layer will not share weights with the old one.
+  Args:
+    layer: An instance of `tf.keras.layers.Layer`.
+  Returns:
+    A new keras layer.
+  Raises:
+    TypeError: If `layer` is not a keras layer.
+    ValueError: If `layer` cannot be correctly cloned.
+  """
+  if not isinstance(layer, tf.keras.layers.Layer):
+    raise TypeError('layer is not a keras layer: %s' % str(layer))
+
+  # pylint:disable=unidiomatic-typecheck
+  if type(layer) == tf.compat.v1.keras.layers.DenseFeatures:
+    raise ValueError('DenseFeatures V1 is not supported. '
+                     'Use tf.compat.v2.keras.layers.DenseFeatures instead.')
+  if layer.built:
+    logging.warning(
+        'Beware: Copying a layer that has already been built: \'%s\'.  '
+        'This can lead to subtle bugs because the original layer\'s weights '
+        'will not be used in the copy.', layer.name)
+  # Get a fresh copy so we don't modify an incoming layer in place.  Weights
+  # will not be shared.
+  return type(layer).from_config(layer.get_config())
 
 class RegAllocEncodingNetwork(encoding_network.EncodingNetwork):
 
-  def __init__(self, **kwargs):
-    super().__init__(**kwargs)
-    # remove the first layer (Flatten) in postprocessing_layers cause this will
-    # flatten the B x T x 33 x dim to B x T x (33 x dim).
+  def __init__(self,
+               input_tensor_spec,
+               preprocessing_layers=None,
+               preprocessing_combiner=None,
+               conv_layer_params=None,
+               fc_layer_params=None,
+               dropout_layer_params=None,
+               activation_fn=tf.keras.activations.relu,
+               weight_decay_params=None,
+               kernel_initializer=None,
+               batch_squash=True,
+               dtype=tf.float32,
+               name='EncodingNetwork',
+               conv_type=CONV_TYPE_2D):
+    if preprocessing_layers is None:
+      flat_preprocessing_layers = None
+      preprocessing_nest = None
+    else:
+      # tf.nest.flatten doesn't support tuples as dict keys
+      if isinstance(preprocessing_layers, dict):
+        flat_preprocessing_layers = []
+        preprocessing_nest = {}
+        for layer in preprocessing_layers:
+          flat_preprocessing_layers.append(
+            _copy_layer(preprocessing_layers[layer]))
+          if not isinstance(layer, tuple):
+            layer = (layer,)
+          preprocessing_nest[layer] = len(flat_preprocessing_layers) - 1
+      else:
+        flat_preprocessing_layers = [
+            _copy_layer(layer) for layer in tf.nest.flatten(preprocessing_layers)
+        ]
+        preprocessing_nest = tf.nest.map_structure(lambda l: None,
+                                                     preprocessing_layers)
+      # Assert shallow structure is the same. This verifies preprocessing
+      # layers can be applied on expected input nests.
+      if isinstance(preprocessing_layers, dict):
+        layer_inputs = []
+        for layer in preprocessing_layers:
+          if isinstance(layer, tuple):
+            for input_name in layer:
+              layer_inputs.append(input_name)
+          else:
+            layer_inputs.append(layer)
+        if len(layer_inputs) != len(input_tensor_spec):
+          raise ValueError(
+            'the number of inputs to preprocessing layers needs'
+            'to be equal to the number if input tensors'
+          )
+        for input in layer_inputs:
+          if input not in input_tensor_spec:
+            raise ValueError(
+              'a preprocessing layer requires an input tensor'
+              f'{input}, but it is not present'
+            )
+      else:
+        input_nest = input_tensor_spec
+        # Given the flatten on preprocessing_layers above we need to make sure
+        # input_tensor_spec is a sequence for the shallow_structure check below
+        # to work.
+        if not nest.is_sequence(input_tensor_spec):
+          input_nest = [input_tensor_spec]
+        nest.assert_shallow_structure(preprocessing_layers, input_nest)
+
+    if (len(tf.nest.flatten(input_tensor_spec)) > 1 and
+        preprocessing_combiner is None):
+      raise ValueError(
+          'preprocessing_combiner layer is required when more than 1 '
+          'input_tensor_spec is provided.')
+
+    if preprocessing_combiner is not None:
+      preprocessing_combiner = _copy_layer(preprocessing_combiner)
+
+    if not kernel_initializer:
+      kernel_initializer = tf.compat.v1.variance_scaling_initializer(
+          scale=2.0, mode='fan_in', distribution='truncated_normal')
+
+    layers = []
+
+    if conv_layer_params:
+      if conv_type == '2d':
+        conv_layer_type = tf.keras.layers.Conv2D
+      elif conv_type == '1d':
+        conv_layer_type = tf.keras.layers.Conv1D
+      else:
+        raise ValueError('unsupported conv type of %s. Use 1d or 2d' % (
+            conv_type))
+
+      for config in conv_layer_params:
+        if len(config) == 4:
+          (filters, kernel_size, strides, dilation_rate) = config
+        elif len(config) == 3:
+          (filters, kernel_size, strides) = config
+          dilation_rate = (1, 1) if conv_type == '2d' else (1,)
+        else:
+          raise ValueError(
+              'only 3 or 4 elements permitted in conv_layer_params tuples')
+        layers.append(
+            conv_layer_type(
+                filters=filters,
+                kernel_size=kernel_size,
+                strides=strides,
+                dilation_rate=dilation_rate,
+                activation=activation_fn,
+                kernel_initializer=kernel_initializer,
+                dtype=dtype))
+
+    layers.append(tf.keras.layers.Flatten())
+
+    if fc_layer_params:
+      if dropout_layer_params is None:
+        dropout_layer_params = [None] * len(fc_layer_params)
+      else:
+        if len(dropout_layer_params) != len(fc_layer_params):
+          raise ValueError('Dropout and fully connected layer parameter lists'
+                           'have different lengths (%d vs. %d.)' %
+                           (len(dropout_layer_params), len(fc_layer_params)))
+      if weight_decay_params is None:
+        weight_decay_params = [None] * len(fc_layer_params)
+      else:
+        if len(weight_decay_params) != len(fc_layer_params):
+          raise ValueError('Weight decay and fully connected layer parameter '
+                           'lists have different lengths (%d vs. %d.)' %
+                           (len(weight_decay_params), len(fc_layer_params)))
+
+      for num_units, dropout_params, weight_decay in zip(
+          fc_layer_params, dropout_layer_params, weight_decay_params):
+        kernal_regularizer = None
+        if weight_decay is not None:
+          kernal_regularizer = tf.keras.regularizers.l2(weight_decay)
+        layers.append(
+            tf.keras.layers.Dense(
+                num_units,
+                activation=activation_fn,
+                kernel_initializer=kernel_initializer,
+                kernel_regularizer=kernal_regularizer,
+                dtype=dtype))
+        if not isinstance(dropout_params, dict):
+          dropout_params = {'rate': dropout_params} if dropout_params else None
+
+        if dropout_params is not None:
+          layers.append(
+              permanent_variable_rate_dropout.PermanentVariableRateDropout(
+                  **dropout_params))
+
+    super(encoding_network.EncodingNetwork, self).__init__(
+        input_tensor_spec=input_tensor_spec, state_spec=(), name=name)
+
+    self._preprocessing_nest = preprocessing_nest
+    self._flat_preprocessing_layers = flat_preprocessing_layers
+    self._preprocessing_combiner = preprocessing_combiner
+    self._postprocessing_layers = layers
+    self._batch_squash = batch_squash
+    self.built = True  # Allow access to self.variables
     self._postprocessing_layers = self._postprocessing_layers[1:]
+
+  def call(self, observation, step_type=None, network_state=(), training=False):
+    del step_type  # unused.
+
+    if self._batch_squash:
+      outer_rank = nest_utils.get_outer_rank(
+          observation, self.input_tensor_spec)
+      batch_squash = utils.BatchSquash(outer_rank)
+      observation = tf.nest.map_structure(batch_squash.flatten, observation)
+
+    if self._flat_preprocessing_layers is None:
+      processed = observation
+    else:
+      processed = []
+      if isinstance(self._preprocessing_nest, dict):
+        for layer_name in self._preprocessing_nest:
+          preprocessing_layer = self._flat_preprocessing_layers[
+            self._preprocessing_nest[layer_name]]
+          needed_inputs = []
+          for input_name in layer_name:
+            needed_inputs.append(observation[input_name])
+          if len(layer_name) == 1:
+            processed.append(preprocessing_layer(needed_inputs[0],
+                                                 training=training))
+          else:
+            processed.append(preprocessing_layer(needed_inputs,
+                                                 training=training))
+      else:
+        for obs, layer in zip(
+            nest.flatten_up_to(self._preprocessing_nest, observation),
+            self._flat_preprocessing_layers):
+          processed.append(layer(obs, training=training))
+      if len(processed) == 1 and self._preprocessing_combiner is None:
+        # If only one observation is passed and the preprocessing_combiner
+        # is unspecified, use the preprocessed version of this observation.
+        processed = processed[0]
+
+    states = processed
+
+    if self._preprocessing_combiner is not None:
+      states = self._preprocessing_combiner(states)
+
+    for layer in self._postprocessing_layers:
+      states = layer(states, training=training)
+
+    if self._batch_squash:
+      states = tf.nest.map_structure(batch_squash.unflatten, states)
+
+    return states, network_state
 
 
 class RegAllocProbProjectionNetwork(
