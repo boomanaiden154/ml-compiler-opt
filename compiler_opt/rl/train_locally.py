@@ -25,17 +25,19 @@ from absl import flags
 from absl import logging
 import gin
 import tensorflow as tf
+from tf_agents.agents import tf_agent
 from tf_agents.system import system_multiprocessing as multiprocessing
 from typing import List
 
+from compiler_opt.distributed.local.local_worker_manager import LocalWorkerPool
 from compiler_opt.rl import agent_creators
 from compiler_opt.rl import compilation_runner
 from compiler_opt.rl import constant
+from compiler_opt.rl import corpus
 from compiler_opt.rl import data_reader
 from compiler_opt.rl import gin_external_configurables  # pylint: disable=unused-import
 from compiler_opt.rl import local_data_collector
 from compiler_opt.rl import policy_saver
-from compiler_opt.rl import problem_configuration
 from compiler_opt.rl import random_net_distillation
 from compiler_opt.rl import registry
 from compiler_opt.rl import trainer
@@ -43,12 +45,10 @@ from compiler_opt.rl import trainer
 flags.DEFINE_string('root_dir', os.getenv('TEST_UNDECLARED_OUTPUTS_DIR'),
                     'Root directory for writing logs/summaries/checkpoints.')
 flags.DEFINE_string('data_path', None,
-                    'Path to CNS folder containing IR files.')
+                    'Path to directory containing the corpus.')
 flags.DEFINE_integer(
     'num_workers', None,
     'Number of parallel data collection workers. `None` for max available')
-flags.DEFINE_integer('num_modules', 100,
-                     'Number of modules to collect data for each iteration.')
 flags.DEFINE_multi_string('gin_files', [],
                           'List of paths to gin configuration files.')
 flags.DEFINE_multi_string(
@@ -62,14 +62,13 @@ FLAGS = flags.FLAGS
 def train_eval(agent_name=constant.AgentName.PPO,
                warmstart_policy_dir=None,
                num_policy_iterations=0,
+               num_modules=100,
                num_iterations=100,
                batch_size=64,
                train_sequence_length=1,
                deploy_policy_name='saved_policy',
                use_random_network_distillation=False,
-               moving_average_decay_rate=1,
-               additional_compilation_flags=(),
-               delete_compilation_flags=()):
+               moving_average_decay_rate=1):
   """Train for LLVM inliner."""
   root_dir = FLAGS.root_dir
   problem_config = registry.get_configuration()
@@ -77,9 +76,8 @@ def train_eval(agent_name=constant.AgentName.PPO,
   preprocessing_layer_creator = problem_config.get_preprocessing_layer_creator()
 
   # Initialize trainer and policy saver.
-  tf_agent = agent_creators.create_agent(agent_name, time_step_spec,
-                                         action_spec,
-                                         preprocessing_layer_creator)
+  agent: tf_agent.TFAgent = agent_creators.create_agent(
+      agent_name, time_step_spec, action_spec, preprocessing_layer_creator)
   # create the random network distillation object
   random_network_distillation = None
   if use_random_network_distillation:
@@ -90,33 +88,20 @@ def train_eval(agent_name=constant.AgentName.PPO,
 
   llvm_trainer = trainer.Trainer(
       root_dir=root_dir,
-      agent=tf_agent,
+      agent=agent,
       random_network_distillation=random_network_distillation,
       warmstart_policy_dir=warmstart_policy_dir)
 
   policy_dict = {
-      'saved_policy': tf_agent.policy,
-      'saved_collect_policy': tf_agent.collect_policy,
+      'saved_policy': agent.policy,
+      'saved_collect_policy': agent.collect_policy,
   }
   saver = policy_saver.PolicySaver(policy_dict=policy_dict)
 
-  with open(
-      os.path.join(FLAGS.data_path, 'module_paths'), 'r',
-      encoding='utf-8') as f:
-    module_paths = [
-        os.path.join(FLAGS.data_path, name.rstrip('\n')) for name in f
-    ]
-
-    if not problem_configuration.is_thinlto(module_paths):
-      file_paths = [(path + '.bc', path + '.cmd') for path in module_paths]
-    else:
-      file_paths = [(path + '.bc', path + '.cmd', path + '.thinlto.bc')
-                    for path in module_paths]
-
-  runner = problem_config.get_runner_type()(
-      moving_average_decay_rate=moving_average_decay_rate,
-      additional_flags=additional_compilation_flags,
-      delete_flags=delete_compilation_flags)
+  logging.info('Loading module specs from corpus at %s.', FLAGS.data_path)
+  cps = corpus.Corpus(FLAGS.data_path, problem_config.flags_to_add(),
+                      problem_config.flags_to_delete())
+  logging.info('Done loading module specs from corpus.')
 
   dataset_fn = data_reader.create_sequence_example_dataset_fn(
       agent_name=agent_name,
@@ -145,38 +130,42 @@ def train_eval(agent_name=constant.AgentName.PPO,
     logging.info('Loaded Reward Stat Map from disk, containing %d modules',
                  len(reward_stat_map))
 
-  data_collector = local_data_collector.LocalDataCollector(
-      file_paths=tuple(file_paths),
-      num_workers=FLAGS.num_workers,
-      num_modules=FLAGS.num_modules,
-      runner=runner,
-      parser=sequence_example_iterator_fn,
-      reward_stat_map=reward_stat_map)
+  with LocalWorkerPool(
+      worker_class=problem_config.get_runner_type(),
+      count=FLAGS.num_workers,
+      moving_average_decay_rate=moving_average_decay_rate) as worker_pool:
+    data_collector = local_data_collector.LocalDataCollector(
+        cps=cps,
+        num_modules=num_modules,
+        worker_pool=worker_pool,
+        parser=sequence_example_iterator_fn,
+        reward_stat_map=reward_stat_map)
 
-  # Repeat for num_policy_iterations iterations.
-  t1 = time.time()
-  while (llvm_trainer.global_step_numpy() <
-         num_policy_iterations * num_iterations):
-    t2 = time.time()
-    logging.info('Last iteration took: %f', t2 - t1)
-    t1 = t2
-    with tf.io.gfile.GFile(reward_stat_map_path, 'w') as f:
-      json.dump(reward_stat_map, f, cls=compilation_runner.DataClassJSONEncoder)
+    # Repeat for num_policy_iterations iterations.
+    t1 = time.time()
+    while (llvm_trainer.global_step_numpy() <
+           num_policy_iterations * num_iterations):
+      t2 = time.time()
+      logging.info('Last iteration took: %f', t2 - t1)
+      t1 = t2
+      with tf.io.gfile.GFile(reward_stat_map_path, 'w') as f:
+        json.dump(
+            reward_stat_map, f, cls=compilation_runner.DataClassJSONEncoder)
 
-    policy_path = os.path.join(root_dir, 'policy',
-                               str(llvm_trainer.global_step_numpy()))
-    saver.save(policy_path)
+      policy_path = os.path.join(root_dir, 'policy',
+                                 str(llvm_trainer.global_step_numpy()))
+      saver.save(policy_path)
 
-    dataset_iter, monitor_dict = data_collector.collect_data(
-        policy_path=os.path.join(policy_path, deploy_policy_name))
-    llvm_trainer.train(dataset_iter, monitor_dict, num_iterations)
+      dataset_iter, monitor_dict = data_collector.collect_data(
+          policy_path=os.path.join(policy_path, deploy_policy_name))
+      llvm_trainer.train(dataset_iter, monitor_dict, num_iterations)
 
-    data_collector.on_dataset_consumed(dataset_iter)
+      data_collector.on_dataset_consumed(dataset_iter)
 
-  # Save final policy.
-  saver.save(root_dir)
-  # Wait for all the workers to finish.
-  data_collector.close_pool()
+    # Save final policy.
+    saver.save(root_dir)
+    # Wait for all the workers to finish.
+    data_collector.close_pool()
 
 
 def main(_):

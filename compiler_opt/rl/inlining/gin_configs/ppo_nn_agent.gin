@@ -12,24 +12,13 @@ include 'compiler_opt/rl/inlining/gin_configs/common.gin'
 train_eval.agent_name=%constant.AgentName.PPO
 train_eval.warmstart_policy_dir=''
 train_eval.num_policy_iterations=3000
+train_eval.num_modules=100
 train_eval.num_iterations=300
 train_eval.batch_size=256
 train_eval.train_sequence_length=16
 train_eval.deploy_policy_name='saved_collect_policy'
 train_eval.use_random_network_distillation=False
 train_eval.moving_average_decay_rate=0.8
-
-# TODO(b/233935329): The following clang flags need to be tied to a corpus
-# rather than to a training tool invocation.
-
-# List of flags to add to clang compilation command. The flag names should
-# match the actual flags provided to clang. An example for AFDO reinjection:
-# train_eval.flags_to_add=('-fprofile-sample-use=/path/to/gwp.afdo','-fprofile-remapping-file=/path/to/prof_remap.txt')
-train_eval.additional_compilation_flags=()
-
-# List of flags to remove from clang compilation command. The flag names 
-# should match the actual flags provided to clang.'
-train_eval.delete_compilation_flags=('-split-dwarf-file','-split-dwarf-output','-fthinlto-index','-fprofile-sample-use','-fprofile-remapping-file')
 
 # RandomNetworkDistillation configs, off if train_eval.use_random_network_distillation=False.
 RandomNetworkDistillation.encoding_network = @encoding_network.EncodingNetwork

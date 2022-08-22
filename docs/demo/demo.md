@@ -135,8 +135,8 @@ export TENSORFLOW_AOT_PATH="${TF_PIP}/tensorflow"
 
 mkdir ~/tensorflow
 export TENSORFLOW_C_LIB_PATH=~/tensorflow
-wget --quiet https://storage.googleapis.com/tensorflow/libtensorflow/libtensorflow-cpu-linux-x86_64-2.6.0.tar.gz
-tar xfz libtensorflow-cpu-linux-x86_64-2.6.0.tar.gz -C "${TENSORFLOW_C_LIB_PATH}"
+wget --quiet https://storage.googleapis.com/tensorflow/libtensorflow/libtensorflow-cpu-linux-x86_64-1.15.0.tar.gz
+tar xfz libtensorflow-cpu-linux-x86_64-1.15.0.tar.gz -C "${TENSORFLOW_C_LIB_PATH}"
 ```
 
 ## Build LLVM
@@ -312,6 +312,17 @@ rm -rf $OUTPUT_DIR && \
   --gin_files=compiler_opt/rl/inlining/gin_configs/ppo_nn_agent.gin \
   --gin_bindings=train_eval.warmstart_policy_dir=\"$WARMSTART_OUTPUT_DIR/saved_policy\"
 ```
+
+You may also start a tensorboard to monitor the training process with 
+
+```shell
+tensorboard --logdir=$OUTPUT_DIR
+```
+
+Mainly check the reward_distribution section for the model performance. It
+includes the average reward and the percentile of the reward distributions
+during training. Positive reward means an improvement against the heuristic,
+and negative reward means a regression.
 
 ### Evaluate trained policy on a corpus (Optional)
 

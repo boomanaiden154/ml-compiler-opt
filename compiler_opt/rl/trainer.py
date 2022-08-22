@@ -20,9 +20,12 @@ from absl import logging
 
 import gin
 import tensorflow as tf
+from compiler_opt.rl import random_net_distillation
+from tf_agents.agents import tf_agent
 from tf_agents.policies import policy_loader
 
 from tf_agents.utils import common as common_utils
+from typing import Optional
 
 _INLINING_DEFAULT_KEY = 'inlining_default'
 
@@ -43,14 +46,16 @@ class Trainer(object):
 
   def __init__(
       self,
-      root_dir,
-      agent,
-      random_network_distillation=None,
-      warmstart_policy_dir=None,
+      root_dir: str,
+      agent: tf_agent.TFAgent,
+      random_network_distillation: Optional[
+          random_net_distillation.RandomNetworkDistillation] = None,
+      warmstart_policy_dir: Optional[str] = None,
       # Params for summaries and logging
       checkpoint_interval=10000,
       log_interval=100,
-      summary_interval=1000,
+      summary_log_interval=100,
+      summary_export_interval=1000,
       summaries_flush_secs=10):
     """Initialize the Trainer object.
 
@@ -62,8 +67,10 @@ class Trainer(object):
       checkpoint_interval: int, the training step interval for saving
         checkpoint.
       log_interval: int, the training step interval for logging.
-      summary_interval: int, the training step interval for exporting to
-        tensorboard.
+      summary_log_interval: the number of steps in between logging metrics
+        to tensorboard.
+      summary_export_interval: int, the training step interval for exporting
+        to tensorboard.
       summaries_flush_secs: int, the seconds for flushing to tensorboard.
     """
     self._root_dir = root_dir
@@ -71,7 +78,8 @@ class Trainer(object):
     self._random_network_distillation = random_network_distillation
     self._checkpoint_interval = checkpoint_interval
     self._log_interval = log_interval
-    self._summary_interval = summary_interval
+    self._summary_log_interval = summary_log_interval
+    self._summary_export_interval = summary_export_interval
 
     self._summary_writer = tf.summary.create_file_writer(
         self._root_dir, flush_millis=summaries_flush_secs * 1000)
@@ -106,8 +114,6 @@ class Trainer(object):
     self._checkpointer.initialize_or_restore()
 
     self._start_time = time.time()
-    self._last_checkpoint_step = 0
-    self._last_log_step = 0
 
   def _initialize_metrics(self):
     """Initializes metrics."""
@@ -117,35 +123,40 @@ class Trainer(object):
 
   def _update_metrics(self, experience, monitor_dict):
     """Updates metrics and exports to Tensorboard."""
-    is_action = ~experience.is_boundary()
+    if tf.math.equal(self._global_step % self._summary_log_interval, 0):
+      is_action = ~experience.is_boundary()
 
-    self._data_action_mean.update_state(
-        experience.action, sample_weight=is_action)
-    self._data_reward_mean.update_state(
-        experience.reward, sample_weight=is_action)
-    self._num_trajectories.update_state(experience.is_first())
+      self._data_action_mean.update_state(
+          experience.action, sample_weight=is_action)
+      self._data_reward_mean.update_state(
+          experience.reward, sample_weight=is_action)
+      self._num_trajectories.update_state(experience.is_first())
 
-    with tf.name_scope('default/'):
-      tf.summary.scalar(
-          name='data_action_mean',
-          data=self._data_action_mean.result(),
-          step=self._global_step)
-      tf.summary.scalar(
-          name='data_reward_mean',
-          data=self._data_reward_mean.result(),
-          step=self._global_step)
-      tf.summary.scalar(
-          name='num_trajectories',
-          data=self._num_trajectories.result(),
-          step=self._global_step)
+    # Check earlier rather than later if we should record summaries.
+    # TF also checks it, but much later. Needed to avoid looping through
+    # the dict so gave the if a bigger scope
+    if tf.summary.should_record_summaries():
+      with tf.name_scope('default/'):
+        tf.summary.scalar(
+            name='data_action_mean',
+            data=self._data_action_mean.result(),
+            step=self._global_step)
+        tf.summary.scalar(
+            name='data_reward_mean',
+            data=self._data_reward_mean.result(),
+            step=self._global_step)
+        tf.summary.scalar(
+            name='num_trajectories',
+            data=self._num_trajectories.result(),
+            step=self._global_step)
 
-    for name_scope, d in monitor_dict.items():
-      with tf.name_scope(name_scope + '/'):
-        for key, value in d.items():
-          tf.summary.scalar(name=key, data=value, step=self._global_step)
+      for name_scope, d in monitor_dict.items():
+        with tf.name_scope(name_scope + '/'):
+          for key, value in d.items():
+            tf.summary.scalar(name=key, data=value, step=self._global_step)
 
-    tf.summary.histogram(
-        name='reward', data=experience.reward, step=self._global_step)
+      tf.summary.histogram(
+          name='reward', data=experience.reward, step=self._global_step)
 
   def _reset_metrics(self):
     """Reset num_trajectories."""
@@ -153,31 +164,28 @@ class Trainer(object):
 
   def _log_experiment(self, loss):
     """Log training info."""
-    global_step_val = self._global_step.numpy()
-    if global_step_val - self._last_log_step >= self._log_interval:
+    if tf.math.equal(self._global_step % self._log_interval, 0):
+      global_step_val = self._global_step.numpy()
       logging.info('step = %d, loss = %g', global_step_val, loss)
       time_acc = time.time() - self._start_time
-      steps_per_sec = (global_step_val - self._last_log_step) / time_acc
+      steps_per_sec = self._log_interval / time_acc
       logging.info('%.3f steps/sec', steps_per_sec)
-      self._last_log_step = global_step_val
       self._start_time = time.time()
 
   def _save_checkpoint(self):
-    if (self._global_step.numpy() - self._last_checkpoint_step >=
-        self._checkpoint_interval):
+    if tf.math.equal(self._global_step % self._checkpoint_interval, 0):
       self._checkpointer.save(global_step=self._global_step)
-      self._last_checkpoint_step = self._global_step.numpy()
 
   def global_step_numpy(self):
     return self._global_step.numpy()
 
-  def train(self, dataset_iter, monitor_dict, num_iterations):
+  def train(self, dataset_iter, monitor_dict, num_iterations: int):
     """Trains policy with data from dataset_iter for num_iterations steps."""
     self._reset_metrics()
     # context management is implemented in decorator
     # pylint: disable=not-context-manager
-    with tf.summary.record_if(
-        lambda: tf.math.equal(self._global_step % self._summary_interval, 0)):
+    with tf.summary.record_if(lambda: tf.math.equal(
+        self._global_step % self._summary_export_interval, 0)):
       for _ in range(num_iterations):
         # When the data is not enough to fill in a batch, next(dataset_iter)
         # will throw StopIteration exception, logging a warning message instead

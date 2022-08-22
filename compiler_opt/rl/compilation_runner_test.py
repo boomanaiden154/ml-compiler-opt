@@ -17,6 +17,7 @@
 import os
 import string
 import subprocess
+import threading
 import time
 from unittest import mock
 
@@ -28,6 +29,7 @@ from google.protobuf import text_format  # pytype: disable=pyi-error
 
 from compiler_opt.rl import compilation_runner
 from compiler_opt.rl import constant
+from compiler_opt.rl import corpus
 
 _DEFAULT_FEATURE_VALUE = 12
 _POLICY_FEATURE_VALUE = 34
@@ -101,13 +103,13 @@ class CompilationRunnerTest(tf.test.TestCase):
       self.assertProtoEquals(x, y)
 
   @mock.patch(constant.BASE_MODULE_DIR +
-              '.compilation_runner.CompilationRunner._compile_fn')
+              '.compilation_runner.CompilationRunner.compile_fn')
   def test_policy(self, mock_compile_fn):
     mock_compile_fn.side_effect = _mock_compile_fn
     runner = compilation_runner.CompilationRunner(
         moving_average_decay_rate=_MOVING_AVERAGE_DECAY_RATE)
     data = runner.collect_data(
-        file_paths=('bc', 'cmd'),
+        module_spec=corpus.ModuleSpec(name='dummy'),
         tf_policy_path='policy_path',
         reward_stat=None)
     self.assertEqual(2, mock_compile_fn.call_count)
@@ -131,14 +133,16 @@ class CompilationRunnerTest(tf.test.TestCase):
     self.assertAllClose([0.1998002], data.rewards)
 
   @mock.patch(constant.BASE_MODULE_DIR +
-              '.compilation_runner.CompilationRunner._compile_fn')
+              '.compilation_runner.CompilationRunner.compile_fn')
   def test_default(self, mock_compile_fn):
     mock_compile_fn.side_effect = _mock_compile_fn
     runner = compilation_runner.CompilationRunner(
         moving_average_decay_rate=_MOVING_AVERAGE_DECAY_RATE)
 
     data = runner.collect_data(
-        file_paths=('bc', 'cmd'), tf_policy_path='', reward_stat=None)
+        module_spec=corpus.ModuleSpec(name='dummy'),
+        tf_policy_path='',
+        reward_stat=None)
     # One call when we ask for the default policy, because it can provide both
     # trace and default size.
     self.assertEqual(1, mock_compile_fn.call_count)
@@ -160,14 +164,14 @@ class CompilationRunnerTest(tf.test.TestCase):
     self.assertAllClose([0], data.rewards)
 
   @mock.patch(constant.BASE_MODULE_DIR +
-              '.compilation_runner.CompilationRunner._compile_fn')
+              '.compilation_runner.CompilationRunner.compile_fn')
   def test_given_default_size(self, mock_compile_fn):
     mock_compile_fn.side_effect = _mock_compile_fn
     runner = compilation_runner.CompilationRunner(
         moving_average_decay_rate=_MOVING_AVERAGE_DECAY_RATE)
 
     data = runner.collect_data(
-        file_paths=('bc', 'cmd'),
+        module_spec=corpus.ModuleSpec(name='dummy'),
         tf_policy_path='policy_path',
         reward_stat={
             'default':
@@ -195,7 +199,7 @@ class CompilationRunnerTest(tf.test.TestCase):
     self.assertAllClose([0.199800], data.rewards)
 
   @mock.patch(constant.BASE_MODULE_DIR +
-              '.compilation_runner.CompilationRunner._compile_fn')
+              '.compilation_runner.CompilationRunner.compile_fn')
   def test_exception_handling(self, mock_compile_fn):
     mock_compile_fn.side_effect = subprocess.CalledProcessError(
         returncode=1, cmd='error')
@@ -204,52 +208,15 @@ class CompilationRunnerTest(tf.test.TestCase):
 
     with self.assertRaisesRegex(subprocess.CalledProcessError, 'error'):
       _ = runner.collect_data(
-          file_paths=('bc', 'cmd'),
+          module_spec=corpus.ModuleSpec(name='dummy'),
           tf_policy_path='policy_path',
           reward_stat=None)
     self.assertEqual(1, mock_compile_fn.call_count)
 
-  def test_command_line_file(self):
-    data = ['-cc1', '-foo', '-bar=baz']
-    argfile = self.create_tempfile(content='\0'.join(data))
-    self.assertEqual(
-        compilation_runner.get_command_line_for_bundle(argfile.full_path,
-                                                       'my_file.bc'),
-        ['-cc1', '-foo', '-bar=baz', '-x', 'ir', 'my_file.bc'])
-    self.assertEqual(
-        compilation_runner.get_command_line_for_bundle(argfile.full_path,
-                                                       'my_file.bc',
-                                                       'the_index.bc'),
-        [
-            '-cc1', '-foo', '-bar=baz', '-x', 'ir', 'my_file.bc',
-            '-fthinlto-index=the_index.bc'
-        ])
-
-  def test_command_line_correction(self):
-    delete_compilation_flags = ('-split-dwarf-file', '-split-dwarf-output',
-                                '-fthinlto-index', '-fprofile-sample-use',
-                                '-fprofile-remapping-file')
-    data = [
-        '-cc1', '-fthinlto-index=bad', '-split-dwarf-file', '/tmp/foo.dwo',
-        '-split-dwarf-output', 'somepath/some.dwo'
-    ]
-    argfile = self.create_tempfile(content='\0'.join(data))
-    self.assertEqual(
-        compilation_runner.get_command_line_for_bundle(
-            argfile.full_path, 'hi.bc', delete_flags=delete_compilation_flags),
-        ['-cc1', '-x', 'ir', 'hi.bc'])
-    self.assertEqual(
-        compilation_runner.get_command_line_for_bundle(
-            argfile.full_path,
-            'hi.bc',
-            'index.bc',
-            delete_flags=delete_compilation_flags),
-        ['-cc1', '-x', 'ir', 'hi.bc', '-fthinlto-index=index.bc'])
-
   def test_start_subprocess_output(self):
-    ct = compilation_runner.WorkerCancellationManager()
+    cm = compilation_runner.WorkerCancellationManager()
     output = compilation_runner.start_cancellable_process(
-        ['ls', '-l'], timeout=100, cancellation_manager=ct, want_output=True)
+        ['ls', '-l'], timeout=100, cancellation_manager=cm, want_output=True)
     if output:
       output_str = output.decode('utf-8')
     else:
@@ -268,6 +235,23 @@ class CompilationRunnerTest(tf.test.TestCase):
           cancellation_manager=None)
     time.sleep(2)
     self.assertFalse(os.path.exists(sentinel_file))
+
+  def test_pause_resume(self):
+    cm = compilation_runner.WorkerCancellationManager()
+    start_time = time.time()
+
+    def stop_and_start():
+      time.sleep(0.25)
+      cm.pause_all_processes()
+      time.sleep(1)
+      cm.resume_all_processes()
+
+    threading.Thread(target=stop_and_start).start()
+    compilation_runner.start_cancellable_process(['sleep', '0.5'],
+                                                 30,
+                                                 cancellation_manager=cm)
+    # should be at least 1 second due to the pause.
+    self.assertGreater(time.time() - start_time, 1)
 
 
 if __name__ == '__main__':

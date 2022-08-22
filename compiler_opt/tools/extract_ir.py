@@ -23,13 +23,17 @@ Only run with
 The compilation is assumed to have been performed with clang, using
 -fembed-bitcode=all passed to cc1 (i.e. pass clang -Xclang=-fembed-bitcode=all)
 
-In a ThinLTO case, the compilation is assumed to have been performed specifying
--mllvm -lto-embed-bitcode=post-merge-pre-opt.
+In a distributed ThinLTO case, the compilation is assumed to have been performed
+specifying -mllvm -lto-embed-bitcode=post-merge-pre-opt.
+
+In a local ThinLTO case, the compilation is assumedto have been performed
+specifying -Wl,--save-temps=import -Wl,--thinlto-emit-index-files
 """
 
 import json
 import multiprocessing
 import os
+import pathlib
 import re
 import shutil
 import subprocess
@@ -39,6 +43,8 @@ from typing import Dict, List, Optional
 from absl import app
 from absl import flags
 from absl import logging
+
+from compiler_opt.rl import constant
 
 flags.DEFINE_string(
     'input', None,
@@ -59,11 +65,15 @@ flags.DEFINE_string(
     'Include only those modules with a command line matching this regexp. '
     'Setting it to None for not filtering. Note that the regexp is applied '
     'independently for each separate command line option. For example, ^-Oz$ '
-    'will match Oz - built binaries.')
-flags.DEFINE_bool(
-    'thinlto_build', False, 'Set if the build was ThinLTO, to '
-    'ensure index files are also copied. The build is assumed to have had'
-    '-mllvm -lto-embed-bitcode=post-merge-pre-opt passed to clang.')
+    'will match Oz - built binaries. Does not work with thinlto_build=lld.')
+flags.DEFINE_enum(
+    'thinlto_build', None, ['distributed', 'local'],
+    'Set if the build was performed with either \'distributed\' or '
+    '\'local\' ThinLTO. This ensures the thinlto.bc files are also copied. '
+    'The build is assumed to have had '
+    '-mllvm -lto-embed-bitcode=post-merge-pre-opt passed in the distributed '
+    'case, or -Wl,--save-temps=import and -Wl,--thinlto-emit-index-files '
+    'passed in the local case.')
 
 FLAGS = flags.FLAGS
 
@@ -118,6 +128,16 @@ class TrainingIRExtractor:
   def input_obj(self):
     return os.path.join(self.obj_base_dir(), self._obj_relative_path)
 
+  def lld_src_bc(self):
+    # .3.import.bc is the suffix attached to post-merge-pre-opt ('postimport')
+    # IR bitcode saved by lld. It is hardcoded into lld.
+    return os.path.join(self._obj_base_dir,
+                        self._obj_relative_path + '.3.import.bc')
+
+  def lld_src_thinlto(self):
+    return os.path.join(self._obj_base_dir,
+                        self._obj_relative_path + '.thinlto.bc')
+
   def dest_dir(self):
     return os.path.join(self.output_base_dir(),
                         os.path.dirname(self._obj_relative_path))
@@ -148,8 +168,8 @@ class TrainingIRExtractor:
         self.input_obj(), '/dev/null'
     ]
 
-  def extract(self, llvm_objcopy_path: str, cmd_filter: str,
-              is_thinlto: bool) -> Optional[str]:
+  def _extract_clang_artifacts(self, llvm_objcopy_path: str, cmd_filter: str,
+                               is_thinlto: bool) -> Optional[str]:
     """Run llvm-objcopy to extract the .bc and command line."""
     if not os.path.exists(self.input_obj()):
       logging.info('%s does not exist.', self.input_obj())
@@ -184,14 +204,49 @@ class TrainingIRExtractor:
             (not is_thinlto or os.path.exists(self.thinlto_index_file())))
     return self.relative_output_path()
 
+  def _extract_lld_artifacts(self) -> Optional[str]:
+    """Extract the .bc file with ThinLTO index from an lld ThinLTO invocation.
+    """
+    if not os.path.exists(self.lld_src_bc()):
+      logging.info('%s does not exist.', self.lld_src_bc())
+      return None
+    if not os.path.exists(self.lld_src_thinlto()):
+      logging.info('%s does not exist.', self.lld_src_thinlto())
+      return None
+    os.makedirs(self.dest_dir(), exist_ok=True)
 
-def convert_compile_command_to_objectfile(command: Dict[str, str],
-                                          output_dir: str):
+    # Copy over the files
+    shutil.copy(self.lld_src_bc(), self.bc_file())
+    shutil.copy(self.lld_src_thinlto(), self.thinlto_index_file())
+
+    assert os.path.exists(self.bc_file())
+    assert os.path.exists(self.thinlto_index_file())
+    return self._obj_relative_path
+
+  def extract(self,
+              llvm_objcopy_path: Optional[str] = None,
+              cmd_filter: Optional[str] = None,
+              thinlto_build: Optional[str] = None) -> Optional[str]:
+    if thinlto_build == 'local':
+      return self._extract_lld_artifacts()
+    return self._extract_clang_artifacts(
+        llvm_objcopy_path=llvm_objcopy_path,
+        cmd_filter=cmd_filter,
+        is_thinlto=thinlto_build == 'distributed')
+
+
+def convert_compile_command_to_objectfile(
+    command: Dict[str, str], output_dir: str) -> Optional[TrainingIRExtractor]:
   obj_base_dir = command['directory']
   cmd = command['command']
 
   cmd_parts = cmd.split()
-  obj_index = cmd_parts.index('-o') + 1
+  try:
+    obj_index = cmd_parts.index('-o') + 1
+  except ValueError:
+    # This could happen if there are non-clang commands in compile_commands.json
+    logging.info('Command has no -o option: %s', cmd)
+    return None
   obj_rel_path = cmd_parts[obj_index]
   # TODO(mtrofin): is the obj_base_dir correct for thinlto index bc files?
   return TrainingIRExtractor(
@@ -202,10 +257,12 @@ def convert_compile_command_to_objectfile(command: Dict[str, str],
 
 def load_from_compile_commands(json_array: List[Dict[str, str]],
                                output_dir: str) -> List[TrainingIRExtractor]:
-  return [
+  objs = [
       convert_compile_command_to_objectfile(cmd, output_dir)
       for cmd in json_array
   ]
+  # Filter out None, in case there were non-clang commands in the .json
+  return [obj for obj in objs if obj is not None]
 
 
 def load_from_lld_params(params_array: List[str], obj_base_dir: str,
@@ -232,6 +289,24 @@ def load_from_lld_params(params_array: List[str], obj_base_dir: str,
   return [make_obj(obj_file) for obj_file in just_obj_paths]
 
 
+def load_for_lld_thinlto(obj_base_dir: str,
+                         output_dir: str) -> List[TrainingIRExtractor]:
+  # .3.import.bc is the suffix attached to post-merge-pre-opt ('postimport')
+  # IR bitcode saved by lld. It is hardcoded into lld. ThinLTO index files
+  # are also emitted next to the postimport bitcode, with the suffix
+  # .thinlto.bc instead
+  paths = [str(p) for p in pathlib.Path(obj_base_dir).glob('**/*.3.import.bc')]
+
+  def make_spec(obj_file: str):
+    return TrainingIRExtractor(
+        # Cut away .3.import.bc
+        obj_relative_path=os.path.relpath(obj_file, start=obj_base_dir)[:-12],
+        output_base_dir=output_dir,
+        obj_base_dir=obj_base_dir)
+
+  return [make_spec(path) for path in paths]
+
+
 # This is here just for readability, lint complains if the pooling expression is
 # over 3 lines; and it needs to be a non-local so it may be pickled.
 def extract_artifacts(obj: TrainingIRExtractor) -> Optional[str]:
@@ -242,9 +317,14 @@ def extract_artifacts(obj: TrainingIRExtractor) -> Optional[str]:
 def main(argv):
   if len(argv) > 1:
     raise app.UsageError('Too many command-line arguments.')
-  flags.mark_flags_as_required(['output_dir', 'input'])
+  flags.mark_flags_as_required(['output_dir'])
+
   objs = []
-  if FLAGS.input_type == 'json':
+  if FLAGS.input is None:
+    if FLAGS.thinlto_build != 'local':
+      raise ValueError('--input or --thinlto_build=local must be provided')
+    objs = load_for_lld_thinlto(FLAGS.obj_base_dir, FLAGS.output_dir)
+  elif FLAGS.input_type == 'json':
     with open(FLAGS.input, encoding='utf-8') as f:
       objs = load_from_compile_commands(json.load(f), FLAGS.output_dir)
   elif FLAGS.input_type == 'params':
@@ -262,13 +342,25 @@ def main(argv):
   with multiprocessing.Pool(FLAGS.num_workers) as pool:
     relative_output_paths = pool.map(extract_artifacts, objs)
 
-    # Write all Non-None relative paths to FLAGS.output_dir/module_paths.
-    with open(
-        os.path.join(FLAGS.output_dir, 'module_paths'), 'w',
-        encoding='utf-8') as f:
-      for path in relative_output_paths:
-        if path is not None:
-          f.write(path + '\n')
+  # This comes first rather than later so global_command_override is at the top
+  # of the .json after being written
+  if FLAGS.thinlto_build == 'local':
+    corpus_description = {
+        'global_command_override': constant.UNSPECIFIED_OVERRIDE
+    }
+  else:
+    corpus_description = {}
+
+  corpus_description.update({
+      'has_thinlto': FLAGS.thinlto_build is not None,
+      'modules': [path for path in relative_output_paths if path is not None]
+  })
+
+  with open(
+      os.path.join(FLAGS.output_dir, 'corpus_description.json'),
+      'w',
+      encoding='utf-8') as f:
+    json.dump(corpus_description, f, indent=2)
 
     logging.info('Converted %d files out of %d',
                  len(objs) - relative_output_paths.count(None), len(objs))

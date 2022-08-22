@@ -100,6 +100,18 @@ class ProblemConfiguration(metaclass=abc.ABCMeta):
   def get_runner_type(self) -> 'type[compilation_runner.CompilationRunner]':
     raise NotImplementedError
 
+  # TODO(b/233935329): The following clang flags need to be tied to a corpus
+  # rather than to a training tool invocation.
 
-def is_thinlto(module_paths: Iterable[str]) -> bool:
-  return tf.io.gfile.exists(next(iter(module_paths)) + '.thinlto.bc')
+  # List of flags to add to clang compilation command. The flag names should
+  # match the actual flags provided to clang. An example for AFDO reinjection:
+  # return ['-fprofile-sample-use=/path/to/gwp.afdo',
+  #  '-fprofile-remapping-file=/path/to/prof_remap.txt']
+  def flags_to_add(self) -> Tuple[str, ...]:
+    return ('-mllvm', '-regalloc-enable-development-features')
+
+  # List of flags to remove from clang compilation command. The flag names
+  # should match the actual flags provided to clang.'
+  def flags_to_delete(self) -> Tuple[str, ...]:
+    return ('-split-dwarf-file', '-split-dwarf-output', '-fthinlto-index',
+            '-fprofile-sample-use', '-fprofile-remapping-file')

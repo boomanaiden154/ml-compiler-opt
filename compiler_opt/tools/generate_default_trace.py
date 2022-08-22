@@ -18,20 +18,19 @@ import contextlib
 import functools
 import os
 import queue
-import random
 import re
 import subprocess
-from typing import Dict, List, Optional, Tuple  # pylint:disable=unused-import
+from typing import Dict, List, Optional, Union, Tuple  # pylint:disable=unused-import
 
 from absl import app
 from absl import flags
 from absl import logging
 import gin
+import multiprocessing
 import tensorflow as tf
-from tf_agents.system import system_multiprocessing as multiprocessing
 
 from compiler_opt.rl import compilation_runner
-from compiler_opt.rl import problem_configuration
+from compiler_opt.rl import corpus
 from compiler_opt.rl import registry
 
 # see https://bugs.python.org/issue33315 - we do need these types, but must
@@ -65,13 +64,19 @@ _GIN_BINDINGS = flags.DEFINE_multi_string(
     'gin_bindings', [],
     'Gin bindings to override the values set in the config files.')
 
-ResultsQueueEntry = Optional[Tuple[str, List[str],
-                                   Dict[str, compilation_runner.RewardStat]]]
+ResultsQueueEntry = Union[Optional[Tuple[str, List[str],
+                                         Dict[str,
+                                              compilation_runner.RewardStat]]],
+                          BaseException]
 
 
-def worker(runner: compilation_runner.CompilationRunner, policy_path: str,
-           work_queue: 'queue.Queue[Tuple[str, ...]]',
-           results_queue: 'queue.Queue[Optional[List[str]]]',
+def get_runner() -> compilation_runner.CompilationRunner:
+  problem_config = registry.get_configuration()
+  return problem_config.get_runner_type()(moving_average_decay_rate=0)
+
+
+def worker(policy_path: str, work_queue: 'queue.Queue[corpus.ModuleSpec]',
+           results_queue: 'queue.Queue[ResultsQueueEntry]',
            key_filter: Optional[str]):
   """Describes the job each paralleled worker process does.
 
@@ -87,36 +92,41 @@ def worker(runner: compilation_runner.CompilationRunner, policy_path: str,
     results_queue: the queue where results are deposited.
     key_filter: regex filter for key names to include, or None to include all.
   """
-  m = re.compile(key_filter) if key_filter else None
+  try:
+    runner = get_runner()
+    m = re.compile(key_filter) if key_filter else None
 
-  while True:
-    try:
-      module_triple = work_queue.get_nowait()
-    except queue.Empty:
-      return
-    try:
-      data = runner.collect_data(
-          file_paths=module_triple,
-          tf_policy_path=policy_path,
-          reward_stat=None)
-      if not m:
-        results_queue.put((module_triple[0], data.serialized_sequence_examples,
-                           data.reward_stats))
-        continue
-      new_reward_stats = {}
-      new_sequence_examples = []
-      for k, sequence_example in zip(data.keys,
-                                     data.serialized_sequence_examples):
-        if not m.match(k):
+    while True:
+      try:
+        module_spec = work_queue.get_nowait()
+      except queue.Empty:
+        return
+      try:
+        data = runner.collect_data(
+            module_spec=module_spec,
+            tf_policy_path=policy_path,
+            reward_stat=None)
+        if not m:
+          results_queue.put(
+              (module_spec.name, data.serialized_sequence_examples,
+               data.reward_stats))
           continue
-        new_reward_stats[k] = data.reward_stats[k]
-        new_sequence_examples.append(sequence_example)
-      results_queue.put(
-          (module_triple[0], new_sequence_examples, new_reward_stats))
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
-            RuntimeError):
-      logging.error('Failed to compile %s.', module_triple)
-      results_queue.put(None)
+        new_reward_stats = {}
+        new_sequence_examples = []
+        for k, sequence_example in zip(data.keys,
+                                       data.serialized_sequence_examples):
+          if not m.match(k):
+            continue
+          new_reward_stats[k] = data.reward_stats[k]
+          new_sequence_examples.append(sequence_example)
+        results_queue.put(
+            (module_spec.name, new_sequence_examples, new_reward_stats))
+      except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+              RuntimeError):
+        logging.error('Failed to compile %s.', module_spec.name)
+        results_queue.put(None)
+  except BaseException as e:  # pylint: disable=broad-except
+    results_queue.put(e)
 
 
 def main(_):
@@ -125,36 +135,24 @@ def main(_):
       _GIN_FILES.value, bindings=_GIN_BINDINGS.value, skip_unknown=False)
   logging.info(gin.config_str())
 
-  problem_config = registry.get_configuration()
-  runner = problem_config.get_runner_type()(moving_average_decay_rate=0)
-  assert runner
+  config = registry.get_configuration()
 
-  with open(
-      os.path.join(_DATA_PATH.value, 'module_paths'), 'r',
-      encoding='utf-8') as f:
-    module_paths = [
-        os.path.join(_DATA_PATH.value, name.rstrip('\n')) for name in f
-    ]
-  is_thinlto = problem_configuration.is_thinlto(module_paths)
-  file_suffix = ('.bc', '.cmd', '.thinlto.bc') if is_thinlto else ('.bc',
-                                                                   '.cmd')
+  logging.info('Loading module specs from corpus.')
+  cps = corpus.Corpus(
+      _DATA_PATH.value,
+      additional_flags=config.flags_to_add(),
+      delete_flags=config.flags_to_delete())
+  logging.info('Done loading module specs from corpus.')
+
   if _MODULE_FILTER.value:
     m = re.compile(_MODULE_FILTER.value)
-    module_paths = [mp for mp in module_paths if m.match(mp)]
+    cps.filter(m)
 
   # Sampling if needed.
-  if _SAMPLING_RATE.value < 1:
-    sampled_modules = int(len(module_paths) * _SAMPLING_RATE.value)
-    module_paths = random.sample(module_paths, k=sampled_modules)
-
+  sampled_modules = int(len(cps) * _SAMPLING_RATE.value)
   # sort files by size, to process the large files upfront, hopefully while
   # other smaller files are processed in parallel
-  sizes_and_paths = [(os.path.getsize(p + '.bc'), p) for p in module_paths]
-  sizes_and_paths.sort(reverse=True)
-  sorted_module_paths = [p for _, p in sizes_and_paths]
-  module_specs = [
-      tuple(p + suffix for suffix in file_suffix) for p in sorted_module_paths
-  ]
+  module_specs = cps.sample(k=sampled_modules, sort=True)
 
   worker_count = (
       min(os.cpu_count(), _NUM_WORKERS.value)
@@ -171,17 +169,17 @@ def main(_):
     with performance_context as performance_writer:
       ctx = multiprocessing.get_context()
       m = ctx.Manager()
-      results_queue: ('queue.Queue[ResultsQueueEntry]') = m.Queue()
-      work_queue: 'queue.Queue[Tuple[str, ...]]' = m.Queue()
+      results_queue: 'queue.Queue[ResultsQueueEntry]' = m.Queue()
+      work_queue: 'queue.Queue[corpus.ModuleSpec]' = m.Queue()
       for module_spec in module_specs:
         work_queue.put(module_spec)
 
       # pylint:disable=g-complex-comprehension
       processes = [
           ctx.Process(
-              target=functools.partial(
-                  worker, runner, _POLICY_PATH.value, work_queue, results_queue,
-                  _KEY_FILTER.value)) for _ in range(0, worker_count)
+              target=functools.partial(worker, _POLICY_PATH.value, work_queue,
+                                       results_queue, _KEY_FILTER.value))
+          for _ in range(0, worker_count)
       ]
       # pylint:enable=g-complex-comprehension
 
@@ -199,6 +197,8 @@ def main(_):
                                     total_failed_examples, total_work)
 
         results = results_queue.get()
+        if isinstance(results, BaseException):
+          logging.fatal(results)
         if not results:
           total_failed_examples += 1
           continue
@@ -224,4 +224,4 @@ def main(_):
 
 if __name__ == '__main__':
   flags.mark_flag_as_required('data_path')
-  multiprocessing.handle_main(functools.partial(app.run, main))
+  app.run(main)
