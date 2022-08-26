@@ -36,7 +36,7 @@ def get_num_instructions():
 
 class process_instruction_features(tf.keras.Model):
 
-  def __init__(self, opcode_count, register_count, instruction_count, mbb_quantiles, embedding_dimensions=16):
+  def __init__(self, opcode_count, register_count, instruction_count, mbb_quantiles, embedding_dimensions=32):
     super().__init__()
     self.opcode_count = opcode_count
     self.register_count = register_count
@@ -46,7 +46,7 @@ class process_instruction_features(tf.keras.Model):
                                                      self.embedding_dimensions,
                                                      input_length=self.instruction_count)
     self.mbb_quantiles = mbb_quantiles
-    self.mbb_embedding_layer = tf.keras.layers.Embedding(1000,
+    self.mbb_embedding_layer = tf.keras.layers.Embedding(101,
                                                          4,
                                                          input_length=self.instruction_count)
 
@@ -139,7 +139,7 @@ def get_observation_processing_layer_creator(quantile_file_dir=None,
                                           get_num_instructions(),
                                           quantile_map['mbb_frequencies'])
 
-    if obs_spec in ('mask'):
+    if obs_spec in ('mask',):
       return tf.keras.layers.Lambda(feature_ops.discard_fn)
 
     # Make sure all features have a preprocessing function.
