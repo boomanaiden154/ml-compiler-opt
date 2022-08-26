@@ -36,7 +36,7 @@ def get_num_instructions():
 
 class process_instruction_features(tf.keras.Model):
 
-  def __init__(self, opcode_count, register_count, instruction_count, mbb_quantiles, embedding_dimensions=32):
+  def __init__(self, opcode_count, register_count, instruction_count, mbb_quantiles, embedding_dimensions=16):
     super().__init__()
     self.opcode_count = opcode_count
     self.register_count = register_count
@@ -44,11 +44,13 @@ class process_instruction_features(tf.keras.Model):
     self.embedding_dimensions = embedding_dimensions
     self.embedding_layer = tf.keras.layers.Embedding(self.opcode_count,
                                                      self.embedding_dimensions,
-                                                     input_length=self.instruction_count)
+                                                     input_length=self.instruction_count,
+                                                     mask_zero=True)
     self.mbb_quantiles = mbb_quantiles
     self.mbb_embedding_layer = tf.keras.layers.Embedding(101,
                                                          4,
                                                          input_length=self.instruction_count)
+    self.lstm_layer = tf.keras.layers.LSTM(33)
 
   def get_config(self):
     return {
@@ -64,24 +66,32 @@ class process_instruction_features(tf.keras.Model):
     return cls(**config)
 
   def call(self, inputs):
+    # should be a batch_size * 1 * 300 tensor
     instruction_opcodes = inputs[0]
+    # should be a batch_size * 300 tensor after this operation
     instruction_opcodes = tf.reshape(instruction_opcodes, [-1, self.instruction_count])
+    # should be a batch_size * 33 * 300 tensor
     binary_mapping_matrix = inputs[1]
+    # should result in a batch_size * 300 * 33 tensor
+    binary_mapping_matrix = tf.transpose(binary_mapping_matrix, perm=[0,2,1])
     binary_mapping_matrix_casted = tf.cast(binary_mapping_matrix, tf.float32)
+    # should result in a batch_size * 300 * 16 tensor
     instruction_embeddings = self.embedding_layer(instruction_opcodes)
-
-    matrix_product = tf.linalg.matmul(binary_mapping_matrix_casted,
-                                      instruction_embeddings)
+    embeddings_mask = self.embedding_layer.compute_mask(instruction_opcodes)
 
     mbb_frequencies = tf.reshape(inputs[2], [-1, self.instruction_count])
     mbb_quantiles = tft.apply_buckets(mbb_frequencies, [self.mbb_quantiles])
+    # should result in a batch_size * 300 * 4 tensor
     embedded_mbb_frequencies = self.mbb_embedding_layer(mbb_quantiles)
-    mbb_matrix_product = tf.linalg.matmul(binary_mapping_matrix_casted, embedded_mbb_frequencies)
 
-    concatenated_products = tf.concat([matrix_product, mbb_matrix_product],
-                                      axis=2)
+    # should result in a batch_size * 300 * (4+16+33) tensor
+    concatenated_time_series = tf.concat([instruction_embeddings, binary_mapping_matrix_casted, embedded_mbb_frequencies],
+                                         axis=2)
+    
+    final_carry_state = self.lstm_layer(concatenated_time_series,
+                                        mask=embeddings_mask)
 
-    return concatenated_products
+    return tf.expand_dims(final_carry_state, axis=-1)
 
 # pylint: disable=g-complex-comprehension
 @gin.configurable()
