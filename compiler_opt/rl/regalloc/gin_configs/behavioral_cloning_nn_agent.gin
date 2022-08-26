@@ -10,13 +10,13 @@ include 'compiler_opt/rl/regalloc/gin_configs/common.gin'
 include 'compiler_opt/rl/regalloc/gin_configs/network.gin'
 
 train_eval.agent_name=%constant.AgentName.BEHAVIORAL_CLONE
-train_eval.num_iterations=10000
-train_eval.batch_size=64
+train_eval.num_iterations=20000
+train_eval.batch_size=1024
 train_eval.train_sequence_length=1
 
 RegAllocNetwork.dropout_layer_params = (0.2, 0.2)
 
-tf.train.AdamOptimizer.learning_rate = 0.001
+tf.train.AdamOptimizer.learning_rate = 0.0005
 tf.train.AdamOptimizer.epsilon = 0.0003125
 
 BehavioralCloningAgent.optimizer = @tf.train.AdamOptimizer()

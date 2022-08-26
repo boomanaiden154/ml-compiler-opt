@@ -108,10 +108,11 @@ class ProblemConfiguration(metaclass=abc.ABCMeta):
   # return ['-fprofile-sample-use=/path/to/gwp.afdo',
   #  '-fprofile-remapping-file=/path/to/prof_remap.txt']
   def flags_to_add(self) -> Tuple[str, ...]:
-    return ('-mllvm', '-regalloc-enable-development-features')
+    return ('-mllvm', '-regalloc-enable-development-features', '-fprofile-instrument-use-path=/chromium/src/chrome/build/pgo_profiles/chrome-linux-main-1661384205-142099a268b36c6d5c4493880c31475b5b649143.profdata', '-Wno-backend-plugin')
 
   # List of flags to remove from clang compilation command. The flag names
   # should match the actual flags provided to clang.'
   def flags_to_delete(self) -> Tuple[str, ...]:
     return ('-split-dwarf-file', '-split-dwarf-output', '-fthinlto-index',
-            '-fprofile-sample-use', '-fprofile-remapping-file')
+            '-fprofile-sample-use', '-fprofile-remapping-file', '-fprofile-instrument-use-path')
+

@@ -42,7 +42,7 @@ def build_quantile_map(quantile_file_dir: str):
 
 def discard_fn(obs: types.Float):
   """discard the input feature by setting it to 0."""
-  return tf.zeros(shape=obs.shape + [0], dtype=tf.float32)
+  return tf.zeros(shape=(obs.shape[0],33,1), dtype=tf.float32)
 
 
 def identity_fn(obs: types.Float):
