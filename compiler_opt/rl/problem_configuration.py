@@ -114,5 +114,5 @@ class ProblemConfiguration(metaclass=abc.ABCMeta):
   # should match the actual flags provided to clang.'
   def flags_to_delete(self) -> Tuple[str, ...]:
     return ('-split-dwarf-file', '-split-dwarf-output', '-fthinlto-index',
-            '-fprofile-sample-use', '-fprofile-remapping-file', '-fprofile-instrument-use-path')
+            '-fprofile-sample-use', '-fprofile-remapping-file', '-fprofile-instrument-use-path', '-fvisibility')
 

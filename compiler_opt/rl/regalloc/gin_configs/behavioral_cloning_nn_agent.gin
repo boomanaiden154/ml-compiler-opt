@@ -10,7 +10,7 @@ include 'compiler_opt/rl/regalloc/gin_configs/common.gin'
 include 'compiler_opt/rl/regalloc/gin_configs/network.gin'
 
 train_eval.agent_name=%constant.AgentName.BEHAVIORAL_CLONE
-train_eval.num_iterations=20000
+train_eval.num_iterations=100000
 train_eval.batch_size=1024
 train_eval.train_sequence_length=1
 
