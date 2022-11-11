@@ -102,7 +102,12 @@ class TrainingIRExtractor:
   The object file is assumed to have the .llvmbc and .llvmcmd sections.
   """
 
-  def __init__(self, obj_relative_path, output_base_dir, obj_base_dir=None):
+  def __init__(self,
+               obj_relative_path,
+               output_base_dir,
+               obj_base_dir=None,
+               lld_src_bc='',
+               lld_src_thinlto=''):
     """Set up a TrainingIRExtractor.
 
     Args:
@@ -115,6 +120,12 @@ class TrainingIRExtractor:
     self._obj_relative_path = obj_relative_path
     self._output_base_dir = output_base_dir
     self._obj_base_dir = obj_base_dir if obj_base_dir is not None else ''
+    # .3.import.bc is the suffix attached to post-merge-pre-opt ('postimport')
+    # IR bitcode saved by lld. It is hardcoded into lld.
+    self._lld_src_bc = os.path.join(self._obj_base_dir,
+                                    lld_src_bc)
+    self._lld_src_thinlto = os.path.join(self._obj_base_dir,
+                                         lld_src_thinlto)
 
   def obj_base_dir(self):
     return self._obj_base_dir
@@ -129,14 +140,10 @@ class TrainingIRExtractor:
     return os.path.join(self.obj_base_dir(), self._obj_relative_path)
 
   def lld_src_bc(self):
-    # .3.import.bc is the suffix attached to post-merge-pre-opt ('postimport')
-    # IR bitcode saved by lld. It is hardcoded into lld.
-    return os.path.join(self._obj_base_dir,
-                        self._obj_relative_path + '.3.import.bc')
+    return self._lld_src_bc
 
   def lld_src_thinlto(self):
-    return os.path.join(self._obj_base_dir,
-                        self._obj_relative_path + '.thinlto.bc')
+    return self._lld_src_thinlto
 
   def dest_dir(self):
     return os.path.join(self.output_base_dir(),
@@ -299,10 +306,12 @@ def load_for_lld_thinlto(obj_base_dir: str,
 
   def make_spec(obj_file: str):
     return TrainingIRExtractor(
-        # Cut away .3.import.bc
         obj_relative_path=os.path.relpath(obj_file, start=obj_base_dir)[:-12],
         output_base_dir=output_dir,
-        obj_base_dir=obj_base_dir)
+        obj_base_dir=obj_base_dir,
+        lld_src_bc=obj_file,
+        lld_src_thinlto=os.path.relpath(
+            obj_file, start=obj_base_dir)[:-12] + '.thinlto.bc')
 
   return [make_spec(path) for path in paths]
 
