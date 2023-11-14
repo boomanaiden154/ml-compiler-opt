@@ -4,19 +4,19 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
-absl-py = "==1.0.0"
+absl-py = "==2.0.0"
 gin-config = "==0.5.0"
-psutil = "==5.9.0"
-tf-agents = "==0.16.0"
-tensorflow = "==2.12.0"
-dm-reverb = "==0.11.0"
+psutil = "==5.9.6"
+tf-agents = "==0.17.0"
+tensorflow = "==2.13.0"
+dm-reverb = "==0.13.0"
 
 [dev-packages]
-pylint = "==2.14.1"
-pytest = "==7.1.2"
-pytype = "==2022.06.06"
-yapf = "==0.32.0"
+pylint = "==3.0.2"
+pytest = "==7.4.3"
+pytype = "==2023.10.31"
+yapf = "==0.40.2"
 
 [ci]
-joblib = "==1.1.1"
-shap = "==0.41.0"
+joblib = "==1.3.2"
+shap = "==0.43.0"
